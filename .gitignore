@@ -15,7 +15,7 @@ Thumbs.db
 .env.*
 !.env.example
 
-identity.key
+*.key
 
 #Misc
 *.swp

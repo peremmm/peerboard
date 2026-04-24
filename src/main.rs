@@ -8,18 +8,20 @@ use libp2p::{
     swarm::{SwarmEvent, NetworkBehaviour},
     identify,
     kad::{self, store::MemoryStore, Behaviour as KademliaBehaviour, Event as KademliaEvent, QueryResult},
+    gossipsub::{self, IdentTopic, MessageAuthenticity, Event as GossipsubEvent},
     StreamProtocol,
     SwarmBuilder,
 };
+use clap::{Parser, Subcommand};
 use std::{
     error::Error,
     fs,
     path::Path,
-    time::Duration,
 };
 use futures::StreamExt;
 use tracing::{info, error};
 use tracing_subscriber;
+use tokio::time::{sleep, Duration};
 
 const IDENTITY_FILE: &str = "identity.key";
 
@@ -30,10 +32,30 @@ const BOOTSTRAP_ADDR: &str = "/ip4/170.64.177.57/tcp/8000/p2p/12D3KooWCvwqT3JUzV
 struct MyBehaviour {
     identify: identify::Behaviour,
     kademlia: KademliaBehaviour<MemoryStore>,
+    gossipsub: gossipsub::Behaviour,
+}
+
+#[derive(Parser)]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Subscribe {
+        topic: String,
+    },
+    Publish {
+        topic: String,
+        message: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+
+    let args = Args::parse();
 
     let mut bootstrap_done = false;
 
@@ -67,6 +89,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 kad_config,
             );
 
+            let gossipsub_config = gossipsub::Config::default();
+
+            let gossipsub = gossipsub::Behaviour::new(
+                MessageAuthenticity::Signed(key.clone()),
+                gossipsub_config,
+            ).unwrap();
+
             Ok(MyBehaviour {
                 identify: identify::Behaviour::new(
                     identify::Config::new(
@@ -75,6 +104,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     )
                 ),
                 kademlia,
+                gossipsub,
             })
         })?
         .with_swarm_config(|cfg| {
@@ -90,6 +120,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.dial(bootstrap_addr)?;
     info!("Dialing bootstrap node: {}", bootstrap_peer_id);
 
+    if let Some(cmd) = args.command {
+        match cmd {
+            Commands::Subscribe { topic } => {
+                let full_topic = format!("peerboard/v1/{}", topic);
+                let topic = IdentTopic::new(full_topic.clone());
+
+                swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+                info!("Subscribed to {}", full_topic);
+            }
+
+            Commands::Publish { topic, message } => {
+                let full_topic = format!("peerboard/v1/{}", topic);
+                let topic = IdentTopic::new(full_topic.clone());
+
+                swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+
+                sleep(Duration::from_secs(5)).await;
+
+                match swarm.behaviour_mut().gossipsub.publish(topic, message.as_bytes()) {
+                    Ok(_) => info!("Message published"),
+                    Err(e) => error!("Publish failed: {:?}", e),
+                }
+
+                info!("Published message to {}", full_topic);
+            }
+        }
+    }
 
     // event loop magic
     loop {
@@ -173,6 +230,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
 
                             _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event)) => {
+                match event {
+                    GossipsubEvent::Message {
+                        propagation_source,
+                        message_id,
+                        message,
+                    } => {
+                        if let Ok(text) = String::from_utf8(message.data.clone()) {
+                            info!(
+                    "Received from {}: {}",
+                    propagation_source, text
+                );
                         }
                     }
                     _ => {}

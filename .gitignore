@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+
+.idea/
+*.iml
+out/
+
+.DS_Store
+Thumbs.db
+
+*.log
+
+.env
+.env.*
+!.env.example
+
+identity.key
+
+#Misc
+*.swp
+*~

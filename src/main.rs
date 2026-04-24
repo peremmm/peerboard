@@ -59,6 +59,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut bootstrap_done = false;
 
+    let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
+
     // logging purposes
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -136,14 +138,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
 
-                sleep(Duration::from_secs(5)).await;
+                pending_publish = Some((topic, message.into_bytes()));
 
-                match swarm.behaviour_mut().gossipsub.publish(topic, message.as_bytes()) {
-                    Ok(_) => info!("Message published"),
-                    Err(e) => error!("Publish failed: {:?}", e),
-                }
-
-                info!("Published message to {}", full_topic);
+                info!("Queued message for publishing after peers connect");
             }
         }
     }
@@ -211,9 +208,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         match result {
 
                             QueryResult::Bootstrap(result) => {
-                                match result {
-                                    Ok(_) => info!("Kademlia bootstrap completed"),
-                                    Err(e) => error!("Bootstrap error: {:?}", e),
+                                if result.is_ok() {
+                                    info!("Kademlia bootstrap completed");
+
+                                    if let Some((topic, data)) = pending_publish.take() {
+                                        match swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                                            Ok(_) => info!("Published message after bootstrap"),
+                                            Err(e) => error!("Publish failed: {:?}", e),
+                                        }
+                                    }
                                 }
                             }
 

@@ -1,3 +1,8 @@
+pub mod pb {
+    // naming of the file is post-build generated
+    include!(concat!(env!("OUT_DIR"), "/_.rs"));
+}
+
 use libp2p::{
     identity,
     noise,
@@ -19,6 +24,10 @@ use std::{
     path::Path,
 };
 use futures::StreamExt;
+use prost::Message;
+use pb::PeerBoardMessage;
+use uuid::Uuid;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, error};
 use tracing_subscriber;
 use tokio::time::{sleep, Duration};
@@ -138,9 +147,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
 
-                pending_publish = Some((topic, message.into_bytes()));
+                let pb_msg = PeerBoardMessage {
+                    peer_id: peer_id.to_string(),
+                    topic: full_topic.clone(),
+                    content: message.clone(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                    message_id: Uuid::new_v4().to_string(),
+                    nickname: "emmanuel".to_string(),
+                };
 
-                info!("Queued message for publishing after peers connect");
+                let mut buf = Vec::new();
+                pb_msg.encode(&mut buf).unwrap();
+
+                pending_publish = Some((topic, buf));
+                info!("Queued protobuf message for publishing");
             }
         }
     }
@@ -243,14 +266,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match event {
                     GossipsubEvent::Message {
                         propagation_source,
-                        message_id,
+                        message_id: _,
                         message,
                     } => {
-                        if let Ok(text) = String::from_utf8(message.data.clone()) {
+                        match pb::PeerBoardMessage::decode(&message.data[..]) {
+                            Ok(msg) => {
                             info!(
-                    "Received from {}: {}",
-                    propagation_source, text
-                );
+                                "Received post:\n  peer: {}\n  topic: {}\n  content: {}\n  nick: {}",
+                                msg.peer_id,
+                                msg.topic,
+                                msg.content,
+                                msg.nickname);
+                            }
+                            Err(e) => {
+                                error!("Failed to decode protobuf message: {:?}", e);
+                            }
                         }
                     }
                     _ => {}

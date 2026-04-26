@@ -35,8 +35,6 @@ use tracing::{info, error};
 use tracing_subscriber;
 use tokio::time::{sleep, Duration};
 
-const IDENTITY_FILE: &str = "identity.key";
-
 // Hardcoded bootstrap node
 const BOOTSTRAP_ADDR: &str = "/ip4/170.64.177.57/tcp/8000/p2p/12D3KooWCvwqT3JUzVQczCvAVFa9EGzNqjHHSMVHVhm3RVyscCNY";
 
@@ -49,6 +47,8 @@ struct MyBehaviour {
 
 #[derive(Parser)]
 struct Args {
+    #[arg(long, default_value = "identity.key")]
+    identity: String,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let keypair = load_or_create_identity()?;
+    let keypair = load_or_create_identity(&args.identity)?;
     let peer_id = PeerId::from(keypair.public());
 
     info!("Peer ID: {}", peer_id);
@@ -319,7 +319,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             Ok(msg) => {
                                 if is_valid_and_new(&msg, &conn) {
                                     info!(
-                                        "Received post:\n  peer: {}\n  topic: {}\n  content: {}\n  nick: {}",
+                                        "Received post:\n  peer: {}\n  topic: {}\n  content: {}\n  nickname: {}",
                                         msg.peer_id,
                                         msg.topic,
                                         msg.content,
@@ -367,18 +367,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-// local file as db
-fn load_or_create_identity() -> Result<identity::Keypair, Box<dyn Error>> {
-    if Path::new(IDENTITY_FILE).exists() {
-        println!("Existing identity file found at {:?}", IDENTITY_FILE);
-        let bytes = fs::read(IDENTITY_FILE)?;
+fn load_or_create_identity(path: &str) -> Result<identity::Keypair, Box<dyn Error>> {
+    if Path::new(path).exists() {
+        println!("Existing identity file found at {:?}", path);
+        let bytes = fs::read(path)?;
         let keypair = identity::Keypair::from_protobuf_encoding(&bytes)?;
         Ok(keypair)
     } else {
         let keypair = identity::Keypair::generate_ed25519();
         let bytes = keypair.to_protobuf_encoding()?;
-        println!("New identity file generated at {:?}", IDENTITY_FILE);
-        fs::write(IDENTITY_FILE, bytes)?;
+        println!("New identity file generated at {:?}", path);
+        fs::write(path, bytes)?;
         Ok(keypair)
     }
 }

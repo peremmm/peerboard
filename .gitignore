@@ -17,6 +17,8 @@ Thumbs.db
 
 *.key
 
+*.db
+
 #Misc
 *.swp
 *~

@@ -23,10 +23,12 @@ use std::{
     fs,
     path::Path,
 };
+use std::ptr::null;
 use futures::StreamExt;
 use prost::Message;
 use pb::PeerBoardMessage;
 use uuid::Uuid;
+use rusqlite::{Connection, params};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, error};
 use tracing_subscriber;
@@ -69,6 +71,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut bootstrap_done = false;
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
+
+    let conn = Connection::open("messages.db")?;
 
     // logging purposes
     tracing_subscriber::fmt()
@@ -159,14 +163,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     nickname: "emmanuel".to_string(),
                 };
 
-                let mut buf = Vec::new();
-                pb_msg.encode(&mut buf).unwrap();
+                if is_valid_and_new(&pb_msg, &conn) {
+                    let mut buf = Vec::new();
+                    pb_msg.encode(&mut buf).unwrap();
 
-                pending_publish = Some((topic, buf));
-                info!("Queued protobuf message for publishing");
+                    pending_publish = Some((topic, buf));
+                    info!("Queued protobuf message for publishing");
+                    insert_message_id(&pb_msg, &conn);
+                }
+
             }
         }
     }
+
+    conn.execute(
+    "CREATE TABLE IF NOT EXISTS messages (
+        message_id TEXT PRIMARY KEY )",
+    [],
+    )?;
 
     // event loop magic
     loop {
@@ -271,15 +285,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     } => {
                         match pb::PeerBoardMessage::decode(&message.data[..]) {
                             Ok(msg) => {
-                            info!(
-                                "Received post:\n  peer: {}\n  topic: {}\n  content: {}\n  nick: {}",
-                                msg.peer_id,
-                                msg.topic,
-                                msg.content,
-                                msg.nickname);
+                                if is_valid_and_new(&msg, &conn) {
+                                    info!(
+                                        "Received post:\n  peer: {}\n  topic: {}\n  content: {}\n  nick: {}",
+                                        msg.peer_id,
+                                        msg.topic,
+                                        msg.content,
+                                        msg.nickname
+                                    );
+                                    insert_message_id(&msg, &conn);
+                                }
                             }
-                            Err(e) => {
-                                error!("Failed to decode protobuf message: {:?}", e);
+                            Err(_) => {
+                                // silent drop
                             }
                         }
                     }
@@ -321,4 +339,51 @@ fn extract_peer_id(addr: &Multiaddr) -> Result<PeerId, Box<dyn Error>> {
         }
     }
     Err("No PeerId found in multiaddr".into())
+}
+
+fn is_valid_and_new(msg: &pb::PeerBoardMessage, conn: &Connection) -> bool {
+
+    if !msg.topic.starts_with("peerboard/v1/") {
+        return false;
+    }
+
+    if msg.content.as_bytes().len() > 4096 {
+        return false;
+    }
+
+    if msg.nickname.as_bytes().len() > 32 {
+        return false;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    if msg.timestamp > now + 300 {
+        return false;
+    }
+
+    if uuid::Uuid::parse_str(&msg.message_id).is_err() {
+        return false;
+    }
+
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE message_id = ?1)",
+        params![msg.message_id],
+        |row| row.get(0),
+    ).unwrap_or(false);
+
+    if exists {
+        return false;
+    }
+
+    true
+}
+
+fn insert_message_id(msg: &pb::PeerBoardMessage, conn: &Connection) {
+    let _ = conn.execute(
+        "INSERT INTO messages (message_id) VALUES (?1)",
+        params![msg.message_id],
+    );
 }

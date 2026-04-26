@@ -7,6 +7,7 @@ use libp2p::{
     identity,
     noise,
     tcp,
+    quic,
     yamux,
     Multiaddr,
     PeerId,
@@ -90,7 +91,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tcp::Config::default(),
             noise::Config::new,
             yamux::Config::default,
-        )?
+        )?.with_quic()
         .with_behaviour(|key| {
             let mut kad_config = kad::Config::new(
                 StreamProtocol::new("/peerboard/kad/1.0.0")

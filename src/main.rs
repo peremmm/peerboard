@@ -62,6 +62,7 @@ enum Commands {
         topic: String,
         message: String,
     },
+    List,
 }
 
 #[tokio::main]
@@ -170,17 +171,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     pending_publish = Some((topic, buf));
                     info!("Queued protobuf message for publishing");
-                    insert_message_id(&pb_msg, &conn);
                 }
 
+            }
+
+            Commands::List => {
+
+                let mut stmt = conn.prepare(
+                    "SELECT peer_id, topic, content, timestamp, nickname
+                        FROM messages
+                        ORDER BY timestamp DESC"
+                ).unwrap();
+
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                }).unwrap();
+
+                println!("\n------ Stored Messages ------");
+
+                for row in rows {
+                    if let Ok((peer, topic, content, ts, nick)) = row {
+                        println!(
+                            "\n[{}] {} ({})\n{}\n",
+                            topic, nick, peer, content
+                        );
+                    }
+                }
+
+                println!("------------------\n");
             }
         }
     }
 
     conn.execute(
-    "CREATE TABLE IF NOT EXISTS messages (
-        message_id TEXT PRIMARY KEY )",
-    [],
+        "CREATE TABLE IF NOT EXISTS messages (
+        message_id TEXT PRIMARY KEY,
+        peer_id TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        nickname TEXT NOT NULL
+    )",
+        [],
     )?;
 
     // event loop magic
@@ -195,7 +233,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 info!("Connected to {}", peer_id);
 
-                if peer_id == bootstrap_peer_id && bootstrap_done {
+                if peer_id == bootstrap_peer_id && !bootstrap_done {
                     info!("Connected to bootstrap → starting DHT bootstrap");
 
                     if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
@@ -248,13 +286,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             QueryResult::Bootstrap(result) => {
                                 if result.is_ok() {
                                     info!("Kademlia bootstrap completed");
-
-                                    if let Some((topic, data)) = pending_publish.take() {
-                                        match swarm.behaviour_mut().gossipsub.publish(topic, data) {
-                                            Ok(_) => info!("Published message after bootstrap"),
-                                            Err(e) => error!("Publish failed: {:?}", e),
-                                        }
-                                    }
                                 }
                             }
 
@@ -311,6 +342,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             _ => {}
+        }
+
+        if let Some((topic, data)) = pending_publish.take() {
+
+            let connected = swarm.connected_peers().count();
+
+            let mesh = swarm
+                .behaviour()
+                .gossipsub
+                .mesh_peers(&topic.hash())
+                .count();
+
+            if connected > 0 && mesh > 0 {
+                match swarm.behaviour_mut().gossipsub.publish(topic, data) {
+                    Ok(_) => info!("Published message"),
+                    Err(_) => {}
+                }
+            } else {
+                pending_publish = Some((topic, data));
+            }
         }
 
     }
@@ -384,7 +435,16 @@ fn is_valid_and_new(msg: &pb::PeerBoardMessage, conn: &Connection) -> bool {
 
 fn insert_message_id(msg: &pb::PeerBoardMessage, conn: &Connection) {
     let _ = conn.execute(
-        "INSERT INTO messages (message_id) VALUES (?1)",
-        params![msg.message_id],
+        "INSERT INTO messages (
+            message_id, peer_id, topic, content, timestamp, nickname
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            msg.message_id,
+            msg.peer_id,
+            msg.topic,
+            msg.content,
+            msg.timestamp,
+            msg.nickname
+        ],
     );
 }

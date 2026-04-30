@@ -7,7 +7,6 @@ use libp2p::{
     identity,
     noise,
     tcp,
-    quic,
     yamux,
     Multiaddr,
     PeerId,
@@ -24,7 +23,6 @@ use std::{
     fs,
     path::Path,
 };
-use std::ptr::null;
 use futures::StreamExt;
 use prost::Message;
 use pb::PeerBoardMessage;
@@ -33,7 +31,10 @@ use rusqlite::{Connection, params};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, error};
 use tracing_subscriber;
-use tokio::time::{sleep, Duration};
+use tokio::{
+    sync::mpsc,
+    time::{Duration}
+};
 
 // Hardcoded bootstrap node
 const BOOTSTRAP_ADDR: &str = "/ip4/170.64.177.57/tcp/8000/p2p/12D3KooWCvwqT3JUzVQczCvAVFa9EGzNqjHHSMVHVhm3RVyscCNY";
@@ -55,6 +56,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
+    Run,
     Subscribe {
         topic: String,
     },
@@ -65,10 +67,19 @@ enum Commands {
     List,
 }
 
+enum CliCommand {
+    Subscribe(String),
+    Unsubscribe(String),
+    Publish(String, String),
+    List,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Args::parse();
+
+    let is_run_mode = matches!(args.command, Some(Commands::Run));
 
     let mut bootstrap_done = false;
 
@@ -137,74 +148,123 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.dial(bootstrap_addr)?;
     info!("Dialing bootstrap node: {}", bootstrap_peer_id);
 
-    if let Some(cmd) = args.command {
-        match cmd {
-            Commands::Subscribe { topic } => {
-                let full_topic = format!("peerboard/v1/{}", topic);
-                let topic = IdentTopic::new(full_topic.clone());
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
 
-                swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
-                info!("Subscribed to {}", full_topic);
-            }
+    if is_run_mode {
+        let tx = cmd_tx.clone();
 
-            Commands::Publish { topic, message } => {
-                let full_topic = format!("peerboard/v1/{}", topic);
-                let topic = IdentTopic::new(full_topic.clone());
+        tokio::spawn(async move {
+            use tokio::io::{self, AsyncBufReadExt};
 
-                swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+            let mut lines = io::BufReader::new(io::stdin()).lines();
 
-                let pb_msg = PeerBoardMessage {
-                    peer_id: peer_id.to_string(),
-                    topic: full_topic.clone(),
-                    content: message.clone(),
-                    timestamp: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64,
-                    message_id: Uuid::new_v4().to_string(),
-                    nickname: "emmanuel".to_string(),
+            println!("Enter commands:");
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                let parts: Vec<&str> = line.trim().split_whitespace().collect();
+
+                if parts.is_empty() {
+                    continue;
+                }
+
+                let cmd = match parts[0] {
+                    "subscribe" if parts.len() == 2 => {
+                        Some(CliCommand::Subscribe(parts[1].to_string()))
+                    }
+                    "unsubscribe" if parts.len() == 2 => {
+                        Some(CliCommand::Unsubscribe(parts[1].to_string()))
+                    }
+                    "publish" if parts.len() >= 3 => {
+                        let topic = parts[1].to_string();
+                        let message = parts[2..].join(" ");
+                        Some(CliCommand::Publish(topic, message))
+                    }
+                    "list" => Some(CliCommand::List),
+                    _ => {
+                        println!("Invalid command");
+                        None
+                    }
                 };
 
-                if is_valid_and_new(&pb_msg, &conn) {
-                    let mut buf = Vec::new();
-                    pb_msg.encode(&mut buf).unwrap();
+                if let Some(cmd) = cmd {
+                    let _ = tx.send(cmd);
+                }
+            }
+        });
+    }
 
-                    pending_publish = Some((topic, buf));
-                    info!("Queued protobuf message for publishing");
+    if !is_run_mode {
+        if let Some(cmd) = args.command {
+            match cmd {
+                Commands::Run => {} // TODO
+
+                Commands::Subscribe { topic } => {
+                    let full_topic = format!("peerboard/v1/{}", topic);
+                    let topic = IdentTopic::new(full_topic.clone());
+
+                    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+                    info!("Subscribed to {}", full_topic);
                 }
 
-            }
+                Commands::Publish { topic, message } => {
+                    let full_topic = format!("peerboard/v1/{}", topic);
+                    let topic = IdentTopic::new(full_topic.clone());
 
-            Commands::List => {
+                    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
 
-                let mut stmt = conn.prepare(
-                    "SELECT peer_id, topic, content, timestamp, nickname
+                    let pb_msg = PeerBoardMessage {
+                        peer_id: peer_id.to_string(),
+                        topic: full_topic.clone(),
+                        content: message.clone(),
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64,
+                        message_id: Uuid::new_v4().to_string(),
+                        nickname: "emmanuel".to_string(),
+                    };
+
+                    if is_valid_and_new(&pb_msg, &conn) {
+                        let mut buf = Vec::new();
+                        pb_msg.encode(&mut buf).unwrap();
+
+                        pending_publish = Some((topic, buf));
+                        info!("Queued protobuf message for publishing");
+                    }
+
+                }
+
+                Commands::List => {
+
+                    let mut stmt = conn.prepare(
+                        "SELECT peer_id, topic, content, timestamp, nickname
                         FROM messages
                         ORDER BY timestamp DESC"
-                ).unwrap();
+                    ).unwrap();
 
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                }).unwrap();
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    }).unwrap();
 
-                println!("\n------ Stored Messages ------");
+                    println!("\n------ Stored Messages ------");
 
-                for row in rows {
-                    if let Ok((peer, topic, content, ts, nick)) = row {
-                        println!(
-                            "\n[{}] {} ({})\n{}\n",
-                            topic, nick, peer, content
-                        );
+                    for row in rows {
+                        if let Ok((peer, topic, content, ts, nick)) = row {
+                            println!(
+                                "\n[{}] {} ({})\n{}\n",
+                                topic, nick, peer, content
+                            );
+                        }
                     }
-                }
 
-                println!("------------------\n");
+                    println!("------------------\n");
+                }
             }
         }
     }
@@ -223,51 +283,95 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // event loop magic
     loop {
+        tokio::select! {
 
-        match swarm.select_next_some().await {
+        Some(cmd) = cmd_rx.recv() => {
+            match cmd {
+                CliCommand::Subscribe(topic) => {
+                    let full = format!("peerboard/v1/{}", topic);
+                    let topic = IdentTopic::new(full.clone());
 
-            SwarmEvent::NewListenAddr { address, .. } => {
-                info!("Listening on {}", address);
-            }
+                    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+                    println!("Subscribed to {}", full);
+                }
 
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                info!("Connected to {}", peer_id);
+                CliCommand::Unsubscribe(topic) => {
+                    let full = format!("peerboard/v1/{}", topic);
+                    let topic = IdentTopic::new(full.clone());
 
-                if peer_id == bootstrap_peer_id && !bootstrap_done {
-                    info!("Connected to bootstrap → starting DHT bootstrap");
+                    swarm.behaviour_mut().gossipsub.unsubscribe(&topic).unwrap();
+                    println!("Unsubscribed from {}", full);
+                }
 
-                    if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-                        error!("Bootstrap failed: {:?}", e);
+                CliCommand::Publish(topic, message) => {
+                    let full = format!("peerboard/v1/{}", topic);
+                    let topic_obj = IdentTopic::new(full.clone());
+
+                    swarm.behaviour_mut().gossipsub.subscribe(&topic_obj).unwrap();
+
+                    let pb_msg = PeerBoardMessage {
+                        peer_id: peer_id.to_string(),
+                        topic: full.clone(),
+                        content: message.clone(),
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64,
+                        message_id: Uuid::new_v4().to_string(),
+                        nickname: "emmanuel".to_string(),
+                    };
+
+                    if is_valid_and_new(&pb_msg, &conn) {
+                        let mut buf = Vec::new();
+                        pb_msg.encode(&mut buf).unwrap();
+                        pending_publish = Some((topic_obj, buf));
                     }
+                }
 
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .get_closest_peers(peer_id);
+                CliCommand::List => {
+                    let mut stmt = conn.prepare(
+                        "SELECT peer_id, topic, content, timestamp, nickname
+                         FROM messages ORDER BY timestamp DESC"
+                    ).unwrap();
 
-                    bootstrap_done = true;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    }).unwrap();
+
+                    println!("\n------ Stored Messages ------");
+
+                    for row in rows {
+                        if let Ok((peer, topic, content, _, nick)) = row {
+                            println!("[{}] {} ({})\n{}\n", topic, nick, peer, content);
+                        }
+                    }
                 }
             }
+        }
 
-            SwarmEvent::Behaviour(MyBehaviourEvent::Identify(event)) => {
-                if let identify::Event::Received { peer_id, info, .. } = event {
-                    info!("Identify received from {}", peer_id);
+        event = swarm.select_next_some() => {
+            match event {
 
-                    for addr in info.listen_addrs {
-                        swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr.clone());
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    info!("Listening on {}", address);
+                }
 
-                        info!("Added address for {}: {}", peer_id, addr);
-                    }
+                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    info!("Connected to {}", peer_id);
 
                     if peer_id == bootstrap_peer_id && !bootstrap_done {
-                        info!("Starting bootstrap AFTER identify");
+                        info!("Connected to bootstrap → starting DHT bootstrap");
 
                         if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
                             error!("Bootstrap failed: {:?}", e);
                         }
+
                         swarm
                             .behaviour_mut()
                             .kademlia
@@ -276,76 +380,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         bootstrap_done = true;
                     }
                 }
-            }
 
-            SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(event)) => {
-                match event {
-                    KademliaEvent::OutboundQueryProgressed { result, .. } => {
-                        match result {
-
-                            QueryResult::Bootstrap(result) => {
-                                if result.is_ok() {
-                                    info!("Kademlia bootstrap completed");
-                                }
-                            }
-
-                            QueryResult::GetClosestPeers(result) => {
-                                match result {
-                                    Ok(ok) => {
-                                        info!("Closest peers:");
-                                        for peer in ok.peers {
-                                            println!("{:?}", peer);
-                                        }
-                                    }
-                                    Err(e) => error!("GetClosestPeers error: {:?}", e),
-                                }
-                            }
-
-                            _ => {}
+                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(event)) => {
+                    if let identify::Event::Received { peer_id, info, .. } = event {
+                        for addr in info.listen_addrs {
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                         }
                     }
-                    _ => {}
                 }
-            }
 
-            SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event)) => {
-                match event {
-                    GossipsubEvent::Message {
-                        propagation_source,
-                        message_id: _,
-                        message,
-                    } => {
-                        match pb::PeerBoardMessage::decode(&message.data[..]) {
-                            Ok(msg) => {
-                                if is_valid_and_new(&msg, &conn) {
-                                    info!(
-                                        "Received post:\n  peer: {}\n  topic: {}\n  content: {}\n  nickname: {}",
-                                        msg.peer_id,
-                                        msg.topic,
-                                        msg.content,
-                                        msg.nickname
-                                    );
-                                    insert_message_id(&msg, &conn);
-                                }
-                            }
-                            Err(_) => {
-                                // silent drop
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event)) => {
+                    if let GossipsubEvent::Message { message, .. } = event {
+                        if let Ok(msg) = pb::PeerBoardMessage::decode(&message.data[..]) {
+                            if is_valid_and_new(&msg, &conn) {
+                                info!("Received: {} -> {}", msg.topic, msg.content);
+                                insert_message_id(&msg, &conn);
                             }
                         }
                     }
-                    _ => {}
                 }
-            }
 
-            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                error!("Failed to connect to {:?}: {:?}", peer_id, error);
+                _ => {}
             }
-
-            _ => {}
         }
+    }
 
         if let Some((topic, data)) = pending_publish.take() {
-
             let connected = swarm.connected_peers().count();
 
             let mesh = swarm
@@ -363,7 +423,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 pending_publish = Some((topic, data));
             }
         }
-
     }
 }
 

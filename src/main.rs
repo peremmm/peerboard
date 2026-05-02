@@ -242,17 +242,13 @@ impl Codec for BattleshipCodec {
         Ok(())
     }
 
-    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, _: Self::Response)
+    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, res: Self::Response)
                                -> std::io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let msg = pb::BattleshipResponse {
-            msg: Some(pb::battleship_response::Msg::BoardAck(pb::BoardAck {})),
-        };
-
         let mut buf = Vec::new();
-        msg.encode(&mut buf).unwrap();
+        res.msg.encode(&mut buf).unwrap();
 
         io.write_all(&buf).await?;
         io.close().await?;
@@ -276,6 +272,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut in_game = false;
     let mut is_my_turn = false;
     let mut shot_seq: u32 = 1;
+
+    let my_board = create_fixed_board();
+    let mut my_hits = [[false; 10]; 10];
+
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -596,6 +596,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             swarm.behaviour_mut().battleship.send_request(&target,BattleshipReq { msg },);
                             shot_seq += 1;
                             is_my_turn = false;
+
+                            println!("Waiting for opponent");
                         }
                     }
 
@@ -740,11 +742,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                         println!("Accepted challenge from {}", peer);
                                         println!("Game starting with {}", peer);
+                                        selected_peer = Some(peer);
                                         is_my_turn = false;
-                                        // println!("Opponent goes first");
-
                                         in_game = true;
                                         toggle_logs_during_in_game(in_game, &handle);
+
                                         if let Some(target) = selected_peer {
                                             println!("Sending BoardReady to {}", target);
                                             let msg = pb::BattleshipRequest {
@@ -837,11 +839,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             Some(pb::battleship_request::Msg::Shot(shot)) => {
                                                 println!("Incoming shot {} at ({}, {})", shot.seq, shot.col, shot.row);
 
+                                                let mut hit = false;
+                                                let mut won = false;
+
+                                                if shot.col <= 9 && shot.row <= 9 {
+                                                    let col = shot.col as usize;
+                                                    let row = shot.row as usize;
+
+                                                    hit = my_board[row][col];
+
+                                                    if hit {
+                                                        my_hits[row][col] = true;
+                                                    }
+
+                                                    won = all_ship_cells_hit(&my_board, &my_hits);
+                                                } else {
+                                                    println!("Opponent sent invalid coordinates");
+                                                }
+
                                                 let result = pb::ShotResult {
                                                     seq: shot.seq,
-                                                    hit: false,
+                                                    hit,
                                                     sunk: false,
-                                                    won: false,
+                                                    won,
                                                 };
 
                                                 let response = pb::BattleshipResponse {
@@ -853,8 +873,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     .send_response(channel, BattleshipRes { msg: response })
                                                     .unwrap();
 
-                                                is_my_turn = true;
-                                                println!("Your turn");
+                                                if won {
+                                                    println!("All of your ships have been hit. You lost.");
+                                                    in_game = false;
+                                                    toggle_logs_during_in_game(in_game, &handle);
+                                                } else {
+                                                    is_my_turn = true;
+                                                    println!("Your turn");
+                                                }
                                             }
                                             _ => {}
                                         }
@@ -875,8 +901,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     res.hit, res.sunk, res.won
                                                 );
 
-                                                is_my_turn = true;
-                                                println!("Your turn");
+                                                if res.won {
+                                                    println!("You won!");
+                                                    in_game = false;
+                                                    is_my_turn = false;
+                                                    toggle_logs_during_in_game(in_game, &handle);
+                                                } else {
+                                                    is_my_turn = false;
+                                                    println!("Waiting for opponent");
+                                                }
                                             }
 
                                             _ => {}
@@ -1020,6 +1053,51 @@ fn print_help(in_game: bool) {
 fn is_valid_topic(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
+
+// TODO fixed placement for now
+fn create_fixed_board() -> [[bool; 10]; 10] {
+    let mut board = [[false; 10]; 10];
+
+    // carrier: 5 cells
+    for col in 0..5 {
+        board[0][col] = true;
+    }
+
+    // battleship: 4 cells
+    for col in 0..4 {
+        board[2][col] = true;
+    }
+
+    // cruiser: 3 cells
+    for col in 0..3 {
+        board[4][col] = true;
+    }
+
+    // submarine: 3 cells
+    for col in 0..3 {
+        board[6][col] = true;
+    }
+
+    // destroyer: 2 cells
+    for col in 0..2 {
+        board[8][col] = true;
+    }
+
+    board
+}
+
+fn all_ship_cells_hit(board: &[[bool; 10]; 10], hits: &[[bool; 10]; 10]) -> bool {
+    for row in 0..10 {
+        for col in 0..10 {
+            if board[row][col] && !hits[row][col] {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
 
 fn toggle_logs_during_in_game<S>(b: bool, handle: &reload::Handle<EnvFilter, S>, ) {
     let level = if b { "warn" } else { "info" };

@@ -1,7 +1,7 @@
 # PeerBoard (Rust libp2p)
 
 A distributed peer-to-peer message board built using:
-- libp2p (TCP + QUIC + GossipSub + Kademlia)
+- libp2p (TCP + QUIC + GossipSub + Kademlia + Rendezvous)
 - protobuf (prost)
 - SQLite (rusqlite)
 
@@ -15,9 +15,16 @@ A distributed peer-to-peer message board built using:
 - Message validation (strict rules)
 - SQLite storage
 - CLI commands:
-    - subscribe
-    - publish
-    - list
+    - subscribe <topic>
+    - unsubscribe <topic>
+    - post <topic> <message>
+    - list <topic>
+    - discover
+    - challenge <index>
+      - shoot <column> <row>
+      - resign
+    - accept <true|false>
+    - help
 
 ---
 
@@ -75,14 +82,75 @@ Machine A receives the message after a few seconds.
 ---
 ### Suggested Test flow
 1. Start subscriber
-2. Wait 10–20 seconds
-3. Start publisher
-4. Verify message received
-5. Run list to confirm storage
+2. Start publisher
+3. Verify message received
+4. Run list to confirm storage
+5. 
 
 ---
 
+### Commands in Test
+Run
+```bash 
+cargo run -- run 
+```
+
+Help - Displays the available commands. 
+
+When you are not in a game, it shows message board and matchmaking commands.
+When you are in a game, it only shows Battleship commands.
+```bash 
+help
+```
+
+Subscribe to a Topic
+```bash 
+subscribe general
+```
+
+Unsubscribe from a Topic
+```bash 
+unsubscribe general
+```
+
+Post a Message
+```bash 
+post general "hello world"
+```
+
+View Stored Messages
+```bash 
+view general
+```
+
+Discover Peers
+```bash 
+discover
+```
+
+Challenge a Peer
+```bash 
+challenge 1
+```
+
+Accept or Decline a Challenge
+```bash 
+accept true
+```
+
+Shoot - Fires at a coordinate during a Battleship game.
+```bash 
+shoot 0 0
+```
+
+Resign - Ends the current Battleship game and tells the opponent that you resigned.
+```bash
+resign
+```
+----
 ### Notes
+Logs will be turned off during battle state. Turned on again after.
+
 Identity Handling
 
 Each node uses a unique identity file
@@ -95,27 +163,8 @@ node1.key, node2.key
 ```
 On different machines → default is fine
 
----
+### Battleship
 
-### Common Issues
-💔 No message received
-
-* Ensure different PeerIds
-* Wait ~10–20 seconds for mesh formation
-
-💔 Stuck in pending
-
-Happens if no peers in GossipSub mesh yet
-System will retry automatically
+Ships are auto placed in fixed position
 
 ---
-
-### Commands
-Subscribe
-```bash cargo run -- subscribe <topic> ```
-
-Publish
-```bash cargo run -- publish <topic> "<message>" ```
-
-List Stored Messages (on any device/terminal)
-```bash cargo run -- list```

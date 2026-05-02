@@ -60,21 +60,13 @@ struct Args {
 #[derive(Subcommand)]
 enum Commands {
     Run,
-    Subscribe {
-        topic: String,
-    },
-    Publish {
-        topic: String,
-        message: String,
-    },
-    List,
 }
 
 enum CliCommand {
     Subscribe(String),
     Unsubscribe(String),
-    Publish(String, String),
-    List,
+    Post(String, String),
+    View(String),
     Discover,
     Help,
 }
@@ -186,12 +178,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     "unsubscribe" if parts.len() == 2 => {
                         Some(CliCommand::Unsubscribe(parts[1].to_string()))
                     }
-                    "publish" if parts.len() >= 3 => {
+                    "post" if parts.len() >= 3 => {
                         let topic = parts[1].to_string();
                         let message = parts[2..].join(" ");
-                        Some(CliCommand::Publish(topic, message))
+                        Some(CliCommand::Post(topic, message))
                     }
-                    "list" => Some(CliCommand::List),
+                    "view" if parts.len() >= 2 => {
+                        Some(CliCommand::View(parts[1].to_string()))
+                    },
                     "discover" => Some(CliCommand::Discover),
                     "help" => Some(CliCommand::Help),
                     _ => {
@@ -205,82 +199,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         });
-    }
-
-    if !is_run_mode {
-        if let Some(cmd) = args.command {
-            match cmd {
-                Commands::Run => {} // TODO
-
-                Commands::Subscribe { topic } => {
-                    let full_topic = format!("peerboard/v1/{}", topic);
-                    let topic = IdentTopic::new(full_topic.clone());
-
-                    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
-                    info!("Subscribed to {}", full_topic);
-                }
-
-                Commands::Publish { topic, message } => {
-                    let full_topic = format!("peerboard/v1/{}", topic);
-                    let topic = IdentTopic::new(full_topic.clone());
-
-                    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
-
-                    let pb_msg = PeerBoardMessage {
-                        peer_id: peer_id.to_string(),
-                        topic: full_topic.clone(),
-                        content: message.clone(),
-                        timestamp: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64,
-                        message_id: Uuid::new_v4().to_string(),
-                        nickname: "emmanuel".to_string(),
-                    };
-
-                    if is_valid_and_new(&pb_msg, &conn) {
-                        let mut buf = Vec::new();
-                        pb_msg.encode(&mut buf).unwrap();
-
-                        pending_publish = Some((topic, buf));
-                        info!("Queued protobuf message for publishing");
-                    }
-
-                }
-
-                Commands::List => {
-
-                    let mut stmt = conn.prepare(
-                        "SELECT peer_id, topic, content, timestamp, nickname
-                        FROM messages
-                        ORDER BY timestamp DESC"
-                    ).unwrap();
-
-                    let rows = stmt.query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    }).unwrap();
-
-                    println!("\n------ Stored Messages ------");
-
-                    for row in rows {
-                        if let Ok((peer, topic, content, ts, nick)) = row {
-                            println!(
-                                "\n[{}] {} ({})\n{}\n",
-                                topic, nick, peer, content
-                            );
-                        }
-                    }
-
-                    println!("------------------\n");
-                }
-            }
-        }
     }
 
     conn.execute(
@@ -319,7 +237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Unsubscribed from {}", full);
                 }
 
-                CliCommand::Publish(topic, message) => {
+                CliCommand::Post(topic, message) => {
                     if is_valid_topic(&topic) {
                         let full = format!("peerboard/v1/{}", topic);
                         let topic_obj = IdentTopic::new(full.clone());
@@ -346,13 +264,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                CliCommand::List => {
+                CliCommand::View(topic) => {
+                    if !is_valid_topic(&topic) {
+                        return Err("Invalid topic".into());
+                    }
+                    let full_topic = format!("peerboard/v1/{}", topic);
+
                     let mut stmt = conn.prepare(
                         "SELECT peer_id, topic, content, timestamp, nickname
-                         FROM messages ORDER BY timestamp DESC"
-                    ).unwrap();
+                         FROM messages
+                         WHERE topic = ?1
+                         ORDER BY timestamp DESC"
+                    )?;
 
-                    let rows = stmt.query_map([], |row| {
+                    let rows = stmt.query_map([&full_topic], |row| {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
@@ -613,8 +538,8 @@ fn print_help() {
     println!("\nAvailable commands:");
     println!("subscribe <topic>");
     println!("unsubscribe <topic>");
-    println!("publish <topic> <message>");
-    println!("list");
+    println!("post <topic> <message>");
+    println!("view <topic>");
     println!("discover");
     println!("help");
     println!("\n[peerboard] > ")

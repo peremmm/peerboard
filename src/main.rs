@@ -14,6 +14,7 @@ use libp2p::{
     identify,
     kad::{self, store::MemoryStore, Behaviour as KademliaBehaviour, Event as KademliaEvent, QueryResult},
     gossipsub::{self, IdentTopic, MessageAuthenticity, Event as GossipsubEvent},
+    rendezvous,
     StreamProtocol,
     SwarmBuilder,
 };
@@ -45,6 +46,7 @@ struct MyBehaviour {
     identify: identify::Behaviour,
     kademlia: KademliaBehaviour<MemoryStore>,
     gossipsub: gossipsub::Behaviour,
+    rendezvous: rendezvous::client::Behaviour,
 }
 
 #[derive(Parser)]
@@ -73,6 +75,7 @@ enum CliCommand {
     Unsubscribe(String),
     Publish(String, String),
     List,
+    Help
 }
 
 #[tokio::main]
@@ -136,6 +139,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ),
                 kademlia,
                 gossipsub,
+                rendezvous: rendezvous::client::Behaviour::new(key.clone())
             })
         })?
         .with_swarm_config(|cfg| {
@@ -161,7 +165,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let mut lines = io::BufReader::new(io::stdin()).lines();
 
-            println!("Enter commands:");
+            print_help();
 
             while let Ok(Some(line)) = lines.next_line().await {
                 let parts: Vec<&str> = line.trim().split_whitespace().collect();
@@ -183,6 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Some(CliCommand::Publish(topic, message))
                     }
                     "list" => Some(CliCommand::List),
+                    "help" => Some(CliCommand::Help),
                     _ => {
                         println!("Invalid command");
                         None
@@ -355,6 +360,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
+
+                CliCommand::Help => {
+                    print_help();
+                }
             }
         }
 
@@ -367,27 +376,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     info!("Connected to {}", peer_id);
-
-                    if peer_id == bootstrap_peer_id && !bootstrap_done {
-                        info!("Connected to bootstrap → starting DHT bootstrap");
-
-                        if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-                            error!("Bootstrap failed: {:?}", e);
-                        }
-
-                        swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .get_closest_peers(peer_id);
-
-                        bootstrap_done = true;
-                    }
                 }
 
                 SwarmEvent::Behaviour(MyBehaviourEvent::Identify(event)) => {
                     if let identify::Event::Received { peer_id, info, .. } = event {
                         for addr in info.listen_addrs {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                        }
+
+                        if peer_id == bootstrap_peer_id && !bootstrap_done {
+                            info!("Identify received from bootstrap → starting DHT bootstrap");
+
+                            if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+                                error!("Bootstrap failed: {:?}", e);
+                            }
+                            // self lookup
+                            swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .get_closest_peers(PeerId::from(keypair.public()));
+
+                            bootstrap_done = true;
                         }
                     }
                 }
@@ -408,6 +417,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         KademliaEvent::OutboundQueryProgressed { result, .. } => {
                             match result {
                                 QueryResult::GetClosestPeers(Ok(ok)) => {
+                                    println!("{:?}", ok.peers); // TODO remove me when address is fixed
                                     for peer in ok.peers {
                                         known_peers.insert(peer.peer_id);
                                     }
@@ -430,6 +440,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         _ => {}
                     }
                 }
+
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Rendezvous(event)) => {
+                        match event {
+                            rendezvous::client::Event::Registered { namespace, .. } => {
+                                info!("Successfully registered in namespace: {}", namespace);
+                            }
+                            rendezvous::client::Event::RegisterFailed { namespace, error, .. } => {
+                                error!("Register failed for {}: {:?}", namespace, error);
+                            }
+                            _ => {}
+                        }
+                    }
 
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         known_peers.remove(&peer_id);
@@ -541,4 +563,14 @@ fn insert_message_id(msg: &pb::PeerBoardMessage, conn: &Connection) {
             msg.nickname
         ],
     );
+}
+
+fn print_help() {
+    println!("\nAvailable commands:");
+    println!("subscribe <topic>");
+    println!("unsubscribe <topic>");
+    println!("publish <topic> <message>");
+    println!("list");
+    println!("help");
+    println!("\n[peerboard] > ")
 }

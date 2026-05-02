@@ -68,6 +68,7 @@ enum CliCommand {
     Post(String, String),
     View(String),
     Discover,
+    Challenge(usize),
     Help,
 }
 
@@ -83,6 +84,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut known_peers: HashSet<PeerId> = HashSet::new();
 
     let mut discovered_peers: HashSet<PeerId> = HashSet::new();
+
+    let mut selected_peer: Option<PeerId> = None;
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -187,6 +190,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Some(CliCommand::View(parts[1].to_string()))
                     },
                     "discover" => Some(CliCommand::Discover),
+                    "challenge" if parts.len() == 2 => {
+                        if let Ok(idx) = parts[1].parse::<usize>() {
+                            Some(CliCommand::Challenge(idx))
+                        } else {
+                            println!("Invalid index");
+                            None
+                        }
+                    }
                     "help" => Some(CliCommand::Help),
                     _ => {
                         println!("Invalid command");
@@ -300,8 +311,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     use rendezvous::Namespace;
 
                     let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
-
                     swarm.behaviour_mut().rendezvous.discover(Some(ns), None, None, bootstrap_peer_id);
+                }
+
+                CliCommand::Challenge(index) => {
+                    let peers: Vec<_> = discovered_peers.iter().cloned().collect();
+
+                    if index == 0 || index > peers.len() {
+                        println!("Invalid selection");
+                        continue;
+                    }
+                    let target = peers[index - 1];
+                    selected_peer = Some(target);
+                    println!("Selected peer: {}", target);
                 }
 
                 CliCommand::Help => {
@@ -412,8 +434,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                 println!("\nDiscovered peers:");
 
-                                for peer in &discovered_peers {
-                                    println!("- {}", peer);
+                                let peers: Vec<_> = discovered_peers.iter().cloned().collect();
+
+                                for (i, peer) in peers.iter().enumerate() {
+                                    println!("{}. {}", i + 1, peer);
                                 }
 
                                 println!("\n[peerboard] > ");
@@ -541,6 +565,7 @@ fn print_help() {
     println!("post <topic> <message>");
     println!("view <topic>");
     println!("discover");
+    println!("challenge <index>");
     println!("help");
     println!("\n[peerboard] > ")
 }

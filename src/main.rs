@@ -275,7 +275,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let my_board = create_fixed_board();
     let mut my_hits = [[false; 10]; 10];
-
+    let mut my_shots = [[false; 10]; 10];
+    let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -574,8 +575,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             println!("Coordinates must be 0–9");
                             continue;
                         }
+                        let col_idx = col as usize;
+                        let row_idx = row as usize;
+
+                        if my_shots[row_idx][col_idx] {
+                            println!("You already shot this coordinate");
+                            continue;
+                        }
                         println!("Firing at ({}, {})", col, row);
                         if let Some(target) = selected_peer {
+                            my_shots[row_idx][col_idx] = true;
                             let msg = pb::BattleshipRequest {
                                 msg: Some(pb::battleship_request::Msg::Shot(pb::Shot {
                                     seq: shot_seq,
@@ -584,20 +593,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 })),
                             };
 
-                            let mut buf = Vec::new();
-                            msg.encode(&mut buf).unwrap();
-                            let msg = pb::BattleshipRequest {
-                                msg: Some(pb::battleship_request::Msg::Shot(pb::Shot {
-                                    seq: shot_seq,
-                                    col,
-                                    row,
-                                })),
-                            };
-                            swarm.behaviour_mut().battleship.send_request(&target,BattleshipReq { msg },);
+                            swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
                             shot_seq += 1;
                             is_my_turn = false;
 
                             println!("Waiting for opponent");
+                        } else {
+                            println!("No opponent selected. Cannot send shot.");
                         }
                     }
 

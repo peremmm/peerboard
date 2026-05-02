@@ -183,10 +183,14 @@ impl AsRef<str> for BattleshipProtocol {
 }
 
 #[derive(Debug, Clone)]
-struct BattleshipReq;
+struct BattleshipReq {
+    msg: pb::BattleshipRequest,
+}
 
 #[derive(Debug, Clone)]
-struct BattleshipRes;
+struct BattleshipRes {
+    msg: pb::BattleshipResponse,
+}
 
 #[derive(Clone, Default)]
 struct BattleshipCodec;
@@ -205,10 +209,10 @@ impl Codec for BattleshipCodec {
         let mut buf = Vec::new();
         io.read_to_end(&mut buf).await?;
 
-        let _ = pb::BattleshipRequest::decode(&buf[..])
+        let msg = pb::BattleshipRequest::decode(&buf[..])
             .map_err(|_| std::io::ErrorKind::InvalidData)?;
 
-        Ok(BattleshipReq)
+        Ok(BattleshipReq { msg })
     }
 
     async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T)
@@ -219,23 +223,19 @@ impl Codec for BattleshipCodec {
         let mut buf = Vec::new();
         io.read_to_end(&mut buf).await?;
 
-        let _ = pb::BattleshipResponse::decode(&buf[..])
+        let msg = pb::BattleshipResponse::decode(&buf[..])
             .map_err(|_| std::io::ErrorKind::InvalidData)?;
 
-        Ok(BattleshipRes)
+        Ok(BattleshipRes { msg })
     }
 
-    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, _: Self::Request)
+    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request)
                               -> std::io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let msg = pb::BattleshipRequest {
-            msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
-        };
-
         let mut buf = Vec::new();
-        msg.encode(&mut buf).unwrap();
+        req.msg.encode(&mut buf).unwrap();
 
         io.write_all(&buf).await?;
         io.close().await?;
@@ -275,6 +275,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut in_game = false;
     let mut is_my_turn = false;
+    let mut shot_seq: u32 = 1;
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -574,6 +575,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                         println!("Firing at ({}, {})", col, row);
+                        if let Some(target) = selected_peer {
+                            let msg = pb::BattleshipRequest {
+                                msg: Some(pb::battleship_request::Msg::Shot(pb::Shot {
+                                    seq: shot_seq,
+                                    col,
+                                    row,
+                                })),
+                            };
+
+                            let mut buf = Vec::new();
+                            msg.encode(&mut buf).unwrap();
+                            let msg = pb::BattleshipRequest {
+                                msg: Some(pb::battleship_request::Msg::Shot(pb::Shot {
+                                    seq: shot_seq,
+                                    col,
+                                    row,
+                                })),
+                            };
+                            swarm.behaviour_mut().battleship.send_request(&target,BattleshipReq { msg },);
+                            shot_seq += 1;
+                            is_my_turn = false;
+                        }
                     }
 
                 CliCommand::Help => {
@@ -724,7 +747,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         toggle_logs_during_in_game(in_game, &handle);
                                         if let Some(target) = selected_peer {
                                             println!("Sending BoardReady to {}", target);
-                                            swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq);
+                                            let msg = pb::BattleshipRequest {
+                                                msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
+                                            };
+                                            swarm
+                                                .behaviour_mut()
+                                                .battleship
+                                                .send_request(&target, BattleshipReq { msg });
                                         }
 
                                         // Unregister
@@ -749,7 +778,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             toggle_logs_during_in_game(in_game, &handle);
                                             if let Some(target) = selected_peer {
                                                 println!("Sending BoardReady to {}", target);
-                                                swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq);
+                                                let msg = pb::BattleshipRequest {
+                                                    msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
+                                                };
+                                                swarm
+                                                    .behaviour_mut()
+                                                    .battleship
+                                                    .send_request(&target, BattleshipReq { msg });
                                             }
 
                                             // Unregister from rendezvous
@@ -781,22 +816,71 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         match event {
                             request_response::Event::Message { peer, message } => {
                                 match message {
-                                    RequestResponseMessage::Request { channel, .. } => {
-                                        is_my_turn = false; // opponent waits
-                                        println!("Received BoardReady from {}", peer);
-                                        swarm.behaviour_mut().battleship.send_response(channel, BattleshipRes).unwrap();
-                                        println!("Sent BoardAck to {}", peer);
-                                        println!(
-                                            "Game ready. {}",
-                                            if is_my_turn { "Your turn" } else { "Waiting for opponent" }
-                                        );
+                                    RequestResponseMessage::Request { request, channel, .. } => {
+                                        match request.msg.msg {
+                                            Some(pb::battleship_request::Msg::BoardReady(_)) => {
+                                                println!("Received BoardReady from {}", peer);
+
+                                                let response = pb::BattleshipResponse {
+                                                    msg: Some(pb::battleship_response::Msg::BoardAck(pb::BoardAck {})),
+                                                };
+
+                                                swarm.behaviour_mut().battleship
+                                                .send_response(channel, BattleshipRes { msg: response }).unwrap();
+                                                println!("Sent BoardAck to {}", peer);
+                                                println!(
+                                                    "Game ready. {}",
+                                                    if is_my_turn { "Your turn" } else { "Waiting for opponent" }
+                                                );
+                                            }
+
+                                            Some(pb::battleship_request::Msg::Shot(shot)) => {
+                                                println!("Incoming shot {} at ({}, {})", shot.seq, shot.col, shot.row);
+
+                                                let result = pb::ShotResult {
+                                                    seq: shot.seq,
+                                                    hit: false,
+                                                    sunk: false,
+                                                    won: false,
+                                                };
+
+                                                let response = pb::BattleshipResponse {
+                                                    msg: Some(pb::battleship_response::Msg::ShotResult(result)),
+                                                };
+
+                                                swarm.behaviour_mut()
+                                                    .battleship
+                                                    .send_response(channel, BattleshipRes { msg: response })
+                                                    .unwrap();
+
+                                                is_my_turn = true;
+                                                println!("Your turn");
+                                            }
+                                            _ => {}
+                                        }
                                     }
-                                    RequestResponseMessage::Response { .. } => {
-                                        println!("Received BoardAck from {}", peer);
-                                        println!(
-                                            "Game ready. {}",
-                                            if is_my_turn { "Your turn" } else { "Waiting for opponent" }
-                                        );
+                                    RequestResponseMessage::Response { response, .. } => {
+                                        match response.msg.msg {
+                                            Some(pb::battleship_response::Msg::BoardAck(_)) => {
+                                                println!("Received BoardAck from {}", peer);
+                                                println!(
+                                                    "Game ready. {}",
+                                                    if is_my_turn { "Your turn" } else { "Waiting for opponent" }
+                                                );
+                                            }
+
+                                            Some(pb::battleship_response::Msg::ShotResult(res)) => {
+                                                println!(
+                                                    "Shot result: hit={}, sunk={}, won={}",
+                                                    res.hit, res.sunk, res.won
+                                                );
+
+                                                is_my_turn = true;
+                                                println!("Your turn");
+                                            }
+
+                                            _ => {}
+                                        }
                                     }
                                 }
                             }

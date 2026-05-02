@@ -42,12 +42,16 @@ cargo build
 
 Terminal 1 (Subscriber)
 ```bash
-cargo run -- --identity node1.key subscribe general
+cargo run -- --identity node1.key run
+
+subscribe general
 ```
 
 Terminal 2 (Publisher)
 ```bash
-cargo run -- --identity node2.key publish general "hello world"
+cargo run -- --identity node2.key run
+
+publish general "hello world"
 ```
 
 Expected
@@ -68,12 +72,16 @@ Make sure both machines:
 
 Machine A (Subscriber)
 ```bash
-cargo run -- subscribe general
+cargo run -- run
+
+subscribe general
 ```
 
 Machine B (Publisher)
 ```bash
-cargo run -- publish general "hello world"
+cargo run -- run
+
+publish general "hello world"
 ```
 
 Expected

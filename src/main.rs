@@ -34,11 +34,12 @@ use pb::PeerBoardMessage;
 use uuid::Uuid;
 use rusqlite::{Connection, params};
 use tracing::{info, error};
-use tracing_subscriber;
+use tracing_subscriber::{fmt, EnvFilter, reload, prelude::*};
 use tokio::{
     sync::mpsc,
     time::{Duration}
 };
+use tracing_subscriber::reload::Handle;
 
 // Hardcoded bootstrap node
 const BOOTSTRAP_ADDR: &str = "/ip4/170.64.177.57/tcp/8000/p2p/12D3KooWCvwqT3JUzVQczCvAVFa9EGzNqjHHSMVHVhm3RVyscCNY";
@@ -268,20 +269,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut bootstrap_done = false;
 
     let mut known_peers: HashSet<PeerId> = HashSet::new();
-
     let mut discovered_peers: HashSet<PeerId> = HashSet::new();
-
     let mut selected_peer: Option<PeerId> = None;
 
     let mut in_game = false;
+    let mut is_my_turn = false;
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
     let conn = Connection::open("messages.db")?;
 
     // logging purposes
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+    let (filter_layer, handle) = reload::Layer::new(EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt::layer())
         .init();
 
     let keypair = load_or_create_identity(&args.identity)?;
@@ -587,15 +589,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             bootstrap_done = true;
                         }
 
-                        let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
-                        if let Err(e) = swarm
-                            .behaviour_mut()
-                            .rendezvous
-                            .register(ns, bootstrap_peer_id, None)
-                        {
-                            error!("Rendezvous register failed (retry): {:?}", e);
-                        } else {
-                            info!("Rendezvous register retried");
+                        if !in_game {
+                            let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                            if let Err(e) = swarm
+                                .behaviour_mut()
+                                .rendezvous
+                                .register(ns, bootstrap_peer_id, None)
+                            {
+                                error!("Rendezvous register failed (retry): {:?}", e);
+                            } else {
+                                info!("Rendezvous register retried");
+                            }
                         }
                     }
                 }
@@ -688,8 +692,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                         println!("Accepted challenge from {}", peer);
                                         println!("Game starting with {}", peer);
+                                        is_my_turn = false;
+                                        // println!("Opponent goes first");
 
                                         in_game = true;
+                                        toggle_logs_during_in_game(in_game, &handle);
                                         if let Some(target) = selected_peer {
                                             println!("Sending BoardReady to {}", target);
                                             swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq);
@@ -710,9 +717,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         println!("Challenge response: accepted = {}", response.accepted);
 
                                         if response.accepted {
+                                            is_my_turn = true;
                                             println!("Game starting with {}", peer);
 
                                             in_game = true;
+                                            toggle_logs_during_in_game(in_game, &handle);
                                             if let Some(target) = selected_peer {
                                                 println!("Sending BoardReady to {}", target);
                                                 swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq);
@@ -748,12 +757,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             request_response::Event::Message { peer, message } => {
                                 match message {
                                     RequestResponseMessage::Request { channel, .. } => {
+                                        is_my_turn = false; // opponent waits
                                         println!("Received BoardReady from {}", peer);
                                         swarm.behaviour_mut().battleship.send_response(channel, BattleshipRes).unwrap();
                                         println!("Sent BoardAck to {}", peer);
+                                        println!(
+                                            "Game ready. {}",
+                                            if is_my_turn { "Your turn" } else { "Waiting for opponent" }
+                                        );
                                     }
                                     RequestResponseMessage::Response { .. } => {
                                         println!("Received BoardAck from {}", peer);
+                                        println!(
+                                            "Game ready. {}",
+                                            if is_my_turn { "Your turn" } else { "Waiting for opponent" }
+                                        );
                                     }
                                 }
                             }
@@ -887,4 +905,9 @@ fn print_help() {
 
 fn is_valid_topic(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn toggle_logs_during_in_game<S>(b: bool, handle: &reload::Handle<EnvFilter, S>, ) {
+    let level = if b { "warn" } else { "info" };
+    handle.reload(EnvFilter::new(level)).unwrap();
 }

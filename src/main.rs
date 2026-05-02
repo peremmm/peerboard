@@ -840,7 +840,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
 
                             request_response::Event::OutboundFailure { peer, error, .. } => {
-                                println!("Challenge outbound failure to {}: {:?}", peer, error);
+                                if in_game {
+                                    if let Some(target) = selected_peer {
+                                        let msg = pb::BattleshipRequest {
+                                            msg: Some(pb::battleship_request::Msg::Resign(pb::Resign {})),
+                                        };
+                                        swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
+                                    }
+                                    println!("Ending game because opponent did not respond.");
+
+                                    reset_game_state(
+                                        &mut selected_peer,
+                                        &mut in_game,
+                                        &mut is_my_turn,
+                                        &mut shot_seq,
+                                        &mut my_hits,
+                                        &mut my_shots,
+                                    );
+                                    let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+
+                                    if let Err(e) = swarm
+                                        .behaviour_mut()
+                                        .rendezvous
+                                        .register(ns, bootstrap_peer_id, None)
+                                    {
+                                        error!("Rendezvous re-register failed after timeout: {:?}", e);
+                                    } else {
+                                        info!("Available for matchmaking again");
+                                    }
+                                    toggle_logs_during_in_game(in_game, &handle);
+                                }
                             }
 
                             request_response::Event::InboundFailure { peer, error, .. } => {

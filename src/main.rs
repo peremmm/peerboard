@@ -565,6 +565,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
 
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Challenge(event)) => {
+                        match event {
+                            request_response::Event::Message { peer, message } => {
+                                match message {
+                                    RequestResponseMessage::Request {
+                                        request,
+                                        channel,
+                                        ..
+                                    } => {
+                                        println!("Incoming challenge from {} (nickname: {})", peer, request.nickname);
+
+                                        // TODO auto accept for now
+                                        let response = ChallengeResponseMsg {
+                                            accepted: true,
+                                        };
+
+                                        swarm.behaviour_mut().challenge.send_response(channel, response).unwrap();
+                                    }
+
+                                    RequestResponseMessage::Response {
+                                        response,
+                                        ..
+                                    } => {
+                                        println!("Challenge response: accepted = {}", response.accepted);
+                                    }
+                                }
+                            }
+
+                            request_response::Event::OutboundFailure { peer, error, .. } => {
+                                println!("Challenge outbound failure to {}: {:?}", peer, error);
+                            }
+
+                            request_response::Event::InboundFailure { peer, error, .. } => {
+                                println!("Challenge inbound failure from {}: {:?}", peer, error);
+                            }
+
+                            request_response::Event::ResponseSent { peer, .. } => {
+                                println!("Response sent to {}", peer);
+                            }
+                        }
+                    }
+
                     SwarmEvent::ConnectionClosed { peer_id, .. } => {
                         known_peers.remove(&peer_id);
                         info!("Peer disconnected. Known peers: {}", known_peers.len());

@@ -75,7 +75,8 @@ enum CliCommand {
     Unsubscribe(String),
     Publish(String, String),
     List,
-    Help
+    Discover,
+    Help,
 }
 
 #[tokio::main]
@@ -88,6 +89,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut bootstrap_done = false;
 
     let mut known_peers: HashSet<PeerId> = HashSet::new();
+
+    let mut discovered_peers: HashSet<PeerId> = HashSet::new();
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -189,6 +192,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Some(CliCommand::Publish(topic, message))
                     }
                     "list" => Some(CliCommand::List),
+                    "discover" => Some(CliCommand::Discover),
                     "help" => Some(CliCommand::Help),
                     _ => {
                         println!("Invalid command");
@@ -367,6 +371,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
+                CliCommand::Discover => {
+                    use rendezvous::Namespace;
+
+                    let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+
+                    swarm.behaviour_mut().rendezvous.discover(Some(ns), None, None, bootstrap_peer_id);
+                }
+
                 CliCommand::Help => {
                     print_help();
                 }
@@ -403,6 +415,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 .get_closest_peers(PeerId::from(keypair.public()));
 
                             bootstrap_done = true;
+                        }
+
+                        let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                        if let Err(e) = swarm
+                            .behaviour_mut()
+                            .rendezvous
+                            .register(ns, bootstrap_peer_id, None)
+                        {
+                            error!("Rendezvous register failed (retry): {:?}", e);
+                        } else {
+                            info!("Rendezvous register retried");
                         }
                     }
                 }
@@ -454,6 +477,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
                             rendezvous::client::Event::RegisterFailed { namespace, error, .. } => {
                                 error!("Register failed for {}: {:?}", namespace, error);
+                            }
+                            rendezvous::client::Event::Discovered { registrations, .. } => {
+                                discovered_peers.clear();
+
+                                for reg in registrations {
+                                    discovered_peers.insert(reg.record.peer_id());
+                                }
+
+                                println!("\nDiscovered peers:");
+
+                                for peer in &discovered_peers {
+                                    println!("- {}", peer);
+                                }
+
+                                println!("\n[peerboard] > ");
                             }
                             _ => {}
                         }
@@ -577,6 +615,7 @@ fn print_help() {
     println!("unsubscribe <topic>");
     println!("publish <topic> <message>");
     println!("list");
+    println!("discover");
     println!("help");
     println!("\n[peerboard] > ")
 }

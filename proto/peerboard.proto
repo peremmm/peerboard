@@ -8,3 +8,11 @@ message PeerBoardMessage {
   string message_id = 5;
   string nickname = 6;
 }
+
+message ChallengePropose {
+  string nickname = 1;
+}
+
+message ChallengeResponse {
+  bool accepted = 1;
+}

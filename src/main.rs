@@ -15,6 +15,7 @@ use libp2p::{
     kad::{self, store::MemoryStore, Behaviour as KademliaBehaviour, Event as KademliaEvent, QueryResult},
     gossipsub::{self, IdentTopic, MessageAuthenticity, Event as GossipsubEvent},
     rendezvous::{self, Namespace},
+    request_response::{self, ProtocolSupport, Behaviour as RequestResponseBehaviour, Codec, Message as RequestResponseMessage},
     StreamProtocol,
     SwarmBuilder,
 };
@@ -22,11 +23,12 @@ use clap::{Parser, Subcommand};
 use std::{
     collections::HashSet,
     error::Error,
+    io,
     fs,
     path::Path,
     time::{SystemTime, UNIX_EPOCH}
 };
-use futures::StreamExt;
+use futures::{prelude::*, StreamExt};
 use prost::Message;
 use pb::PeerBoardMessage;
 use uuid::Uuid;
@@ -47,6 +49,7 @@ struct MyBehaviour {
     kademlia: KademliaBehaviour<MemoryStore>,
     gossipsub: gossipsub::Behaviour,
     rendezvous: rendezvous::client::Behaviour,
+    challenge: RequestResponseBehaviour<ChallengeCodec>,
 }
 
 #[derive(Parser)]
@@ -70,6 +73,101 @@ enum CliCommand {
     Discover,
     Challenge(usize),
     Help,
+}
+
+#[derive(Clone)]
+struct ChallengeProtocol;
+
+impl AsRef<str> for ChallengeProtocol {
+    fn as_ref(&self) -> &str {
+        "/peerboard/challenge/1.0.0"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChallengeRequest {
+    nickname: String,
+}
+
+#[derive(Debug, Clone)]
+struct ChallengeResponseMsg {
+    accepted: bool,
+}
+
+#[derive(Clone, Default)]
+struct ChallengeCodec;
+
+#[async_trait::async_trait]
+impl Codec for ChallengeCodec {
+    type Protocol = ChallengeProtocol;
+    type Request = ChallengeRequest;
+    type Response = ChallengeResponseMsg;
+
+    async fn read_request<T>(&mut self, _: &ChallengeProtocol, io: &mut T)
+                             -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        io.read_to_end(&mut buf).await?;
+
+        let msg = pb::ChallengePropose::decode(&buf[..])
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+
+        Ok(ChallengeRequest {
+            nickname: msg.nickname,
+        })
+    }
+
+    async fn read_response<T>(&mut self, _: &ChallengeProtocol, io: &mut T)
+                              -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        io.read_to_end(&mut buf).await?;
+
+        let msg = pb::ChallengeResponse::decode(&buf[..])
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+
+        Ok(ChallengeResponseMsg {
+            accepted: msg.accepted,
+        })
+    }
+
+    async fn write_request<T>(&mut self, _: &ChallengeProtocol, io: &mut T, req: ChallengeRequest)
+                              -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let msg = pb::ChallengePropose {
+            nickname: req.nickname,
+        };
+
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+
+        io.write_all(&buf).await?;
+        io.close().await?;
+        Ok(())
+    }
+
+    async fn write_response<T>(&mut self, _: &ChallengeProtocol, io: &mut T, res: ChallengeResponseMsg)
+                               -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let msg = pb::ChallengeResponse {
+            accepted: res.accepted,
+        };
+
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+
+        io.write_all(&buf).await?;
+        io.close().await?;
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -128,6 +226,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 gossipsub_config,
             ).unwrap();
 
+            let cfg = request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(30));
+
+            let protocols = std::iter::once((
+                ChallengeProtocol,
+                ProtocolSupport::Full,
+            ));
+
+            let challenge = RequestResponseBehaviour::new(
+                protocols,
+                cfg,
+            );
+
             Ok(MyBehaviour {
                 identify: identify::Behaviour::new(
                     identify::Config::new(
@@ -137,7 +248,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ),
                 kademlia,
                 gossipsub,
-                rendezvous: rendezvous::client::Behaviour::new(key.clone())
+                rendezvous: rendezvous::client::Behaviour::new(key.clone()),
+                challenge
             })
         })?
         .with_swarm_config(|cfg| {
@@ -323,7 +435,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     let target = peers[index - 1];
                     selected_peer = Some(target);
-                    println!("Selected peer: {}", target);
+                    println!("Sending challenge to: {}", target);
+
+                    swarm.behaviour_mut().challenge.send_request(
+                        &target,
+                        ChallengeRequest {
+                            nickname: "emmanuel".to_string(),
+                        },
+                    );
                 }
 
                 CliCommand::Help => {
@@ -393,7 +512,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         KademliaEvent::OutboundQueryProgressed { result, .. } => {
                             match result {
                                 QueryResult::GetClosestPeers(Ok(ok)) => {
-                                    println!("{:?}", ok.peers); // TODO remove me when address is fixed
+
                                     for peer in ok.peers {
                                         known_peers.insert(peer.peer_id);
                                     }

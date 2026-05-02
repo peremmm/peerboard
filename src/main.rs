@@ -50,6 +50,7 @@ struct MyBehaviour {
     gossipsub: gossipsub::Behaviour,
     rendezvous: rendezvous::client::Behaviour,
     challenge: RequestResponseBehaviour<ChallengeCodec>,
+    battleship: RequestResponseBehaviour<BattleshipCodec>,
 }
 
 #[derive(Parser)]
@@ -170,6 +171,93 @@ impl Codec for ChallengeCodec {
     }
 }
 
+#[derive(Clone)]
+struct BattleshipProtocol;
+
+impl AsRef<str> for BattleshipProtocol {
+    fn as_ref(&self) -> &str {
+        "/peerboard/battleship/1.0.0"
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BattleshipReq;
+
+#[derive(Debug, Clone)]
+struct BattleshipRes;
+
+#[derive(Clone, Default)]
+struct BattleshipCodec;
+
+#[async_trait::async_trait]
+impl Codec for BattleshipCodec {
+    type Protocol = BattleshipProtocol;
+    type Request = BattleshipReq;
+    type Response = BattleshipRes;
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T)
+                             -> std::io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        io.read_to_end(&mut buf).await?;
+
+        let _ = pb::BattleshipRequest::decode(&buf[..])
+            .map_err(|_| std::io::ErrorKind::InvalidData)?;
+
+        Ok(BattleshipReq)
+    }
+
+    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T)
+                              -> std::io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut buf = Vec::new();
+        io.read_to_end(&mut buf).await?;
+
+        let _ = pb::BattleshipResponse::decode(&buf[..])
+            .map_err(|_| std::io::ErrorKind::InvalidData)?;
+
+        Ok(BattleshipRes)
+    }
+
+    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, _: Self::Request)
+                              -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let msg = pb::BattleshipRequest {
+            msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
+        };
+
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+
+        io.write_all(&buf).await?;
+        io.close().await?;
+        Ok(())
+    }
+
+    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, _: Self::Response)
+                               -> std::io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let msg = pb::BattleshipResponse {
+            msg: Some(pb::battleship_response::Msg::BoardAck(pb::BoardAck {})),
+        };
+
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+
+        io.write_all(&buf).await?;
+        io.close().await?;
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
@@ -184,6 +272,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut discovered_peers: HashSet<PeerId> = HashSet::new();
 
     let mut selected_peer: Option<PeerId> = None;
+
+    let mut in_game = false;
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -239,6 +329,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 cfg,
             );
 
+            let battleship_cfg = request_response::Config::default()
+                .with_request_timeout(Duration::from_secs(30));
+
+            let battleship_protocols = std::iter::once((
+                BattleshipProtocol,
+                ProtocolSupport::Full,
+            ));
+
+            let battleship = RequestResponseBehaviour::new(
+                battleship_protocols,
+                battleship_cfg,
+            );
+
             Ok(MyBehaviour {
                 identify: identify::Behaviour::new(
                     identify::Config::new(
@@ -249,7 +352,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 kademlia,
                 gossipsub,
                 rendezvous: rendezvous::client::Behaviour::new(key.clone()),
-                challenge
+                challenge,
+                battleship
             })
         })?
         .with_swarm_config(|cfg| {
@@ -576,12 +680,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     } => {
                                         println!("Incoming challenge from {} (nickname: {})", peer, request.nickname);
 
-                                        // TODO auto accept for now
                                         let response = ChallengeResponseMsg {
                                             accepted: true,
                                         };
 
                                         swarm.behaviour_mut().challenge.send_response(channel, response).unwrap();
+
+                                        println!("Accepted challenge from {}", peer);
+                                        println!("Game starting with {}", peer);
+
+                                        in_game = true;
+                                        if let Some(target) = selected_peer {
+                                            println!("Sending BoardReady to {}", target);
+                                            swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq);
+                                        }
+
+                                        // Unregister
+                                        use rendezvous::Namespace;
+                                        let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+
+                                        swarm.behaviour_mut().rendezvous.unregister(ns, bootstrap_peer_id);
+                                        println!("Unregistered from matchmaking");
                                     }
 
                                     RequestResponseMessage::Response {
@@ -589,6 +708,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         ..
                                     } => {
                                         println!("Challenge response: accepted = {}", response.accepted);
+
+                                        if response.accepted {
+                                            println!("Game starting with {}", peer);
+
+                                            in_game = true;
+                                            if let Some(target) = selected_peer {
+                                                println!("Sending BoardReady to {}", target);
+                                                swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq);
+                                            }
+
+                                            // Unregister from rendezvous
+                                            use rendezvous::Namespace;
+                                            let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+
+                                            swarm.behaviour_mut().rendezvous.unregister(ns, bootstrap_peer_id);
+                                            println!("Unregistered from matchmaking");
+                                        }
                                     }
                                 }
                             }
@@ -604,6 +740,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             request_response::Event::ResponseSent { peer, .. } => {
                                 println!("Response sent to {}", peer);
                             }
+                        }
+                    }
+
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Battleship(event)) => {
+                        match event {
+                            request_response::Event::Message { peer, message } => {
+                                match message {
+                                    RequestResponseMessage::Request { channel, .. } => {
+                                        println!("Received BoardReady from {}", peer);
+                                        swarm.behaviour_mut().battleship.send_response(channel, BattleshipRes).unwrap();
+                                        println!("Sent BoardAck to {}", peer);
+                                    }
+                                    RequestResponseMessage::Response { .. } => {
+                                        println!("Received BoardAck from {}", peer);
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
 

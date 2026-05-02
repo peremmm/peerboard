@@ -616,8 +616,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                         swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
                         println!("You resigned");
-                        in_game = false;
-                        is_my_turn = false;
+                        reset_game_state(
+                            &mut selected_peer,
+                            &mut in_game,
+                            &mut is_my_turn,
+                            &mut shot_seq,
+                            &mut my_hits,
+                            &mut my_shots,
+                        );
                         toggle_logs_during_in_game(in_game, &handle);
                     } else {
                         println!("No opponent selected. Cannot resign.");
@@ -909,13 +915,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     }
 
                                                     println!("Invalid shot received. Ending game with Resign.");
-                                                    in_game = false;
-                                                    is_my_turn = false;
+                                                    reset_game_state(
+                                                        &mut selected_peer,
+                                                        &mut in_game,
+                                                        &mut is_my_turn,
+                                                        &mut shot_seq,
+                                                        &mut my_hits,
+                                                        &mut my_shots,
+                                                    );
                                                     toggle_logs_during_in_game(in_game, &handle);
                                                 } else if won {
                                                     println!("All of your ships have been hit. You lost.");
-                                                    in_game = false;
-                                                    is_my_turn = false;
+                                                    reset_game_state(
+                                                        &mut selected_peer,
+                                                        &mut in_game,
+                                                        &mut is_my_turn,
+                                                        &mut shot_seq,
+                                                        &mut my_hits,
+                                                        &mut my_shots,
+                                                    );
                                                     toggle_logs_during_in_game(in_game, &handle);
                                                 } else {
                                                     is_my_turn = true;
@@ -929,8 +947,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     msg: Some(pb::battleship_response::Msg::ResignAck(pb::ResignAck {})),
                                                 };
                                                 swarm.behaviour_mut().battleship.send_response(channel, BattleshipRes { msg: response }).unwrap();
-                                                in_game = false;
-                                                is_my_turn = false;
+                                                reset_game_state(
+                                                    &mut selected_peer,
+                                                    &mut in_game,
+                                                    &mut is_my_turn,
+                                                    &mut shot_seq,
+                                                    &mut my_hits,
+                                                    &mut my_shots,
+                                                );
                                                 toggle_logs_during_in_game(in_game, &handle);
                                             }
 
@@ -961,8 +985,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         };
                                                         swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
                                                     }
-                                                    in_game = false;
-                                                    is_my_turn = false;
+                                                    reset_game_state(
+                                                        &mut selected_peer,
+                                                        &mut in_game,
+                                                        &mut is_my_turn,
+                                                        &mut shot_seq,
+                                                        &mut my_hits,
+                                                        &mut my_shots,
+                                                    );
                                                     toggle_logs_during_in_game(in_game, &handle);
                                                 } else {
                                                     is_my_turn = false;
@@ -973,8 +1003,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             Some(pb::battleship_response::Msg::ResignAck(_)) => {
                                                 println!("Resign acknowledged. Game ended.");
 
-                                                in_game = false;
-                                                is_my_turn = false;
+                                                reset_game_state(
+                                                    &mut selected_peer,
+                                                    &mut in_game,
+                                                    &mut is_my_turn,
+                                                    &mut shot_seq,
+                                                    &mut my_hits,
+                                                    &mut my_shots,
+                                                );
                                                 toggle_logs_during_in_game(in_game, &handle);
                                             }
 
@@ -1163,6 +1199,22 @@ fn all_ship_cells_hit(board: &[[bool; 10]; 10], hits: &[[bool; 10]; 10]) -> bool
     }
 
     true
+}
+
+fn reset_game_state(
+    selected_peer: &mut Option<PeerId>,
+    in_game: &mut bool,
+    is_my_turn: &mut bool,
+    shot_seq: &mut u32,
+    my_hits: &mut [[bool; 10]; 10],
+    my_shots: &mut [[bool; 10]; 10],
+) {
+    *selected_peer = None;
+    *in_game = false;
+    *is_my_turn = false;
+    *shot_seq = 1;
+    *my_hits = [[false; 10]; 10];
+    *my_shots = [[false; 10]; 10];
 }
 
 

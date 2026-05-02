@@ -19,16 +19,17 @@ use libp2p::{
 };
 use clap::{Parser, Subcommand};
 use std::{
+    collections::HashSet,
     error::Error,
     fs,
     path::Path,
+    time::{SystemTime, UNIX_EPOCH}
 };
 use futures::StreamExt;
 use prost::Message;
 use pb::PeerBoardMessage;
 use uuid::Uuid;
 use rusqlite::{Connection, params};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, error};
 use tracing_subscriber;
 use tokio::{
@@ -82,6 +83,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let is_run_mode = matches!(args.command, Some(Commands::Run));
 
     let mut bootstrap_done = false;
+
+    let mut known_peers: HashSet<PeerId> = HashSet::new();
 
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
@@ -399,6 +402,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
+
+                SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(event)) => {
+                    match event {
+                        KademliaEvent::OutboundQueryProgressed { result, .. } => {
+                            match result {
+                                QueryResult::GetClosestPeers(Ok(ok)) => {
+                                    for peer in ok.peers {
+                                        known_peers.insert(peer.peer_id);
+                                    }
+                                    info!("Known peers: {}", known_peers.len());
+
+                                    if known_peers.len() < 3 {
+                                        info!("Peer count < 3 → re-bootstrapping");
+
+                                        if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+                                            error!("Re-bootstrap failed: {:?}", e);
+                                        }
+                                    }
+                                }
+                                    QueryResult::GetClosestPeers(Err(e)) => {
+                                        error!("GetClosestPeers error: {:?}", e);
+                                    }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                        known_peers.remove(&peer_id);
+                        info!("Peer disconnected. Known peers: {}", known_peers.len());
+                    }
 
                 _ => {}
             }

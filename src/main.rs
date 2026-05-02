@@ -14,7 +14,7 @@ use libp2p::{
     identify,
     kad::{self, store::MemoryStore, Behaviour as KademliaBehaviour, Event as KademliaEvent, QueryResult},
     gossipsub::{self, IdentTopic, MessageAuthenticity, Event as GossipsubEvent},
-    rendezvous,
+    rendezvous::{self, Namespace},
     StreamProtocol,
     SwarmBuilder,
 };
@@ -147,7 +147,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .build();
 
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    let listen_addr: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse()?;
+    swarm.listen_on(listen_addr.clone())?;
+    swarm.add_external_address(listen_addr);
 
     let bootstrap_addr: Multiaddr = BOOTSTRAP_ADDR.parse()?;
     let bootstrap_peer_id = extract_peer_id(&bootstrap_addr)?;
@@ -296,11 +298,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(cmd) = cmd_rx.recv() => {
             match cmd {
                 CliCommand::Subscribe(topic) => {
-                    let full = format!("peerboard/v1/{}", topic);
-                    let topic = IdentTopic::new(full.clone());
+                    if is_valid_topic(&topic) {
+                        let full = format!("peerboard/v1/{}", topic);
+                        let topic = IdentTopic::new(full.clone());
 
-                    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
-                    println!("Subscribed to {}", full);
+                        swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+                        println!("Subscribed to {}", full);
+                    }
                 }
 
                 CliCommand::Unsubscribe(topic) => {
@@ -312,27 +316,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 CliCommand::Publish(topic, message) => {
-                    let full = format!("peerboard/v1/{}", topic);
-                    let topic_obj = IdentTopic::new(full.clone());
+                    if is_valid_topic(&topic) {
+                        let full = format!("peerboard/v1/{}", topic);
+                        let topic_obj = IdentTopic::new(full.clone());
 
-                    swarm.behaviour_mut().gossipsub.subscribe(&topic_obj).unwrap();
+                        swarm.behaviour_mut().gossipsub.subscribe(&topic_obj).unwrap();
 
-                    let pb_msg = PeerBoardMessage {
-                        peer_id: peer_id.to_string(),
-                        topic: full.clone(),
-                        content: message.clone(),
-                        timestamp: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64,
-                        message_id: Uuid::new_v4().to_string(),
-                        nickname: "emmanuel".to_string(),
-                    };
+                        let pb_msg = PeerBoardMessage {
+                            peer_id: peer_id.to_string(),
+                            topic: full.clone(),
+                            content: message.clone(),
+                            timestamp: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as i64,
+                            message_id: Uuid::new_v4().to_string(),
+                            nickname: "emmanuel".to_string(),
+                        };
 
-                    if is_valid_and_new(&pb_msg, &conn) {
-                        let mut buf = Vec::new();
-                        pb_msg.encode(&mut buf).unwrap();
-                        pending_publish = Some((topic_obj, buf));
+                        if is_valid_and_new(&pb_msg, &conn) {
+                            let mut buf = Vec::new();
+                            pb_msg.encode(&mut buf).unwrap();
+                            pending_publish = Some((topic_obj, buf));
+                        }
                     }
                 }
 
@@ -573,4 +579,8 @@ fn print_help() {
     println!("list");
     println!("help");
     println!("\n[peerboard] > ")
+}
+
+fn is_valid_topic(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }

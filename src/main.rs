@@ -625,6 +625,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             &mut my_shots,
                         );
                         toggle_logs_during_in_game(in_game, &handle);
+                        let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                        match swarm.behaviour_mut().rendezvous.register(ns, bootstrap_peer_id, None) {
+                            Ok(_) => info!("Available for matchmaking again"),
+                            Err(_) => {}
+                        }
                     } else {
                         println!("No opponent selected. Cannot resign.");
                     }
@@ -924,6 +929,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         &mut my_shots,
                                                     );
                                                     toggle_logs_during_in_game(in_game, &handle);
+                                                    let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                                                    match swarm.behaviour_mut().rendezvous.register(ns, bootstrap_peer_id, None) {
+                                                        Ok(_) => info!("Available for matchmaking again"),
+                                                        Err(_) => {}
+                                                    }
                                                 } else if won {
                                                     println!("All of your ships have been hit. You lost.");
                                                     reset_game_state(
@@ -935,6 +945,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         &mut my_shots,
                                                     );
                                                     toggle_logs_during_in_game(in_game, &handle);
+                                                    let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                                                    match swarm.behaviour_mut().rendezvous.register(ns, bootstrap_peer_id, None) {
+                                                        Ok(_) => info!("Available for matchmaking again"),
+                                                        Err(_) => {}
+                                                    }
                                                 } else {
                                                     is_my_turn = true;
                                                     println!("Your turn");
@@ -956,6 +971,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     &mut my_shots,
                                                 );
                                                 toggle_logs_during_in_game(in_game, &handle);
+                                                let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                                                match swarm.behaviour_mut().rendezvous.register(ns, bootstrap_peer_id, None) {
+                                                    Ok(_) => info!("Available for matchmaking again"),
+                                                    Err(_) => {}
+                                                }
                                             }
 
                                             _ => {}
@@ -994,6 +1014,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         &mut my_shots,
                                                     );
                                                     toggle_logs_during_in_game(in_game, &handle);
+                                                    let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                                                    match swarm.behaviour_mut().rendezvous.register(ns, bootstrap_peer_id, None) {
+                                                        Ok(_) => info!("Available for matchmaking again"),
+                                                        Err(_) => {}
+                                                    }
                                                 } else {
                                                     is_my_turn = false;
                                                     println!("Waiting for opponent");
@@ -1012,6 +1037,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     &mut my_shots,
                                                 );
                                                 toggle_logs_during_in_game(in_game, &handle);
+                                                let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                                                match swarm.behaviour_mut().rendezvous.register(ns, bootstrap_peer_id, None) {
+                                                    Ok(_) => info!("Available for matchmaking again"),
+                                                    Err(_) => {}
+                                                }
                                             }
 
                                             _ => {}

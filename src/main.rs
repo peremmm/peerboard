@@ -75,6 +75,7 @@ enum CliCommand {
     Discover,
     Challenge(usize),
     Shoot(u32, u32),
+    Resign,
     Help,
 }
 
@@ -278,8 +279,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut my_shots = [[false; 10]; 10];
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
 
-    let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
-
     let conn = Connection::open("messages.db")?;
 
     // logging purposes
@@ -428,6 +427,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     "help" => Some(CliCommand::Help),
+                    "resign" => Some(CliCommand::Resign),
                     _ => {
                         println!("Invalid command");
                         None
@@ -562,46 +562,67 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                    CliCommand::Shoot(col, row) => {
-                        if !in_game {
-                            println!("Not in a game");
-                            continue;
-                        }
-                        if !is_my_turn {
-                            println!("Not your turn");
-                            continue;
-                        }
-                        if col > 9 || row > 9 {
-                            println!("Coordinates must be 0–9");
-                            continue;
-                        }
-                        let col_idx = col as usize;
-                        let row_idx = row as usize;
-
-                        if my_shots[row_idx][col_idx] {
-                            println!("You already shot this coordinate");
-                            continue;
-                        }
-                        println!("Firing at ({}, {})", col, row);
-                        if let Some(target) = selected_peer {
-                            my_shots[row_idx][col_idx] = true;
-                            let msg = pb::BattleshipRequest {
-                                msg: Some(pb::battleship_request::Msg::Shot(pb::Shot {
-                                    seq: shot_seq,
-                                    col,
-                                    row,
-                                })),
-                            };
-
-                            swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
-                            shot_seq += 1;
-                            is_my_turn = false;
-
-                            println!("Waiting for opponent");
-                        } else {
-                            println!("No opponent selected. Cannot send shot.");
-                        }
+                CliCommand::Shoot(col, row) => {
+                    if !in_game {
+                        println!("Not in a game");
+                        continue;
                     }
+                    if !is_my_turn {
+                        println!("Not your turn");
+                        continue;
+                    }
+                    if col > 9 || row > 9 {
+                        println!("Coordinates must be 0–9");
+                        continue;
+                    }
+                    let col_idx = col as usize;
+                    let row_idx = row as usize;
+
+                    if my_shots[row_idx][col_idx] {
+                        println!("You already shot this coordinate");
+                        continue;
+                    }
+                    println!("Firing at ({}, {})", col, row);
+                    if let Some(target) = selected_peer {
+                        my_shots[row_idx][col_idx] = true;
+                        let msg = pb::BattleshipRequest {
+                            msg: Some(pb::battleship_request::Msg::Shot(pb::Shot {
+                                seq: shot_seq,
+                                col,
+                                row,
+                            })),
+                        };
+
+                        swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
+                        shot_seq += 1;
+                        is_my_turn = false;
+
+                        println!("Waiting for opponent");
+                    } else {
+                        println!("No opponent selected. Cannot send shot.");
+                    }
+                }
+
+                CliCommand::Resign => {
+                    if !in_game {
+                        println!("Not in a game");
+                        continue;
+                    }
+
+                    if let Some(target) = selected_peer {
+                        let msg = pb::BattleshipRequest {
+                            msg: Some(pb::battleship_request::Msg::Resign(pb::Resign {})),
+                        };
+
+                        swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
+                        println!("You resigned");
+                        in_game = false;
+                        is_my_turn = false;
+                        toggle_logs_during_in_game(in_game, &handle);
+                    } else {
+                        println!("No opponent selected. Cannot resign.");
+                    }
+                }
 
                 CliCommand::Help => {
                     print_help(in_game);
@@ -708,17 +729,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 discovered_peers.clear();
 
                                 for reg in registrations {
-                                    discovered_peers.insert(reg.record.peer_id());
+                                    let discovered_peer = reg.record.peer_id();
+                                    if discovered_peer == peer_id {
+                                        continue;
+                                    }
+                                    discovered_peers.insert(discovered_peer);
+                                    for addr in reg.record.addresses() {
+                                        swarm.behaviour_mut().kademlia.add_address(&discovered_peer, addr.clone());
+                                        swarm.behaviour_mut().challenge.add_address(&discovered_peer, addr.clone());
+                                        swarm.behaviour_mut().battleship.add_address(&discovered_peer, addr.clone());
+                                    }
                                 }
-
                                 println!("\nDiscovered peers:");
-
                                 let peers: Vec<_> = discovered_peers.iter().cloned().collect();
-
                                 for (i, peer) in peers.iter().enumerate() {
                                     println!("{}. {}", i + 1, peer);
                                 }
-
                                 println!("\n[peerboard] > ");
                             }
                             _ => {}
@@ -843,6 +869,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                                 let mut hit = false;
                                                 let mut won = false;
+                                                let mut invalid_shot = false;
 
                                                 if shot.col <= 9 && shot.row <= 9 {
                                                     let col = shot.col as usize;
@@ -856,6 +883,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                                     won = all_ship_cells_hit(&my_board, &my_hits);
                                                 } else {
+                                                    invalid_shot = true;
                                                     println!("Opponent sent invalid coordinates");
                                                 }
 
@@ -870,20 +898,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     msg: Some(pb::battleship_response::Msg::ShotResult(result)),
                                                 };
 
-                                                swarm.behaviour_mut()
-                                                    .battleship
-                                                    .send_response(channel, BattleshipRes { msg: response })
-                                                    .unwrap();
+                                                swarm.behaviour_mut().battleship.send_response(channel, BattleshipRes { msg: response }).unwrap();
 
-                                                if won {
+                                                if invalid_shot {
+                                                    if let Some(target) = selected_peer {
+                                                        let msg = pb::BattleshipRequest {
+                                                            msg: Some(pb::battleship_request::Msg::Resign(pb::Resign {})),
+                                                        };
+                                                        swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
+                                                    }
+
+                                                    println!("Invalid shot received. Ending game with Resign.");
+                                                    in_game = false;
+                                                    is_my_turn = false;
+                                                    toggle_logs_during_in_game(in_game, &handle);
+                                                } else if won {
                                                     println!("All of your ships have been hit. You lost.");
                                                     in_game = false;
+                                                    is_my_turn = false;
                                                     toggle_logs_during_in_game(in_game, &handle);
                                                 } else {
                                                     is_my_turn = true;
                                                     println!("Your turn");
                                                 }
                                             }
+
+                                            Some(pb::battleship_request::Msg::Resign(_)) => {
+                                                println!("Opponent resigned. You win.");
+                                                let response = pb::BattleshipResponse {
+                                                    msg: Some(pb::battleship_response::Msg::ResignAck(pb::ResignAck {})),
+                                                };
+                                                swarm.behaviour_mut().battleship.send_response(channel, BattleshipRes { msg: response }).unwrap();
+                                                in_game = false;
+                                                is_my_turn = false;
+                                                toggle_logs_during_in_game(in_game, &handle);
+                                            }
+
                                             _ => {}
                                         }
                                     }
@@ -905,6 +955,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                                 if res.won {
                                                     println!("You won!");
+                                                    if let Some(target) = selected_peer {
+                                                        let msg = pb::BattleshipRequest {
+                                                            msg: Some(pb::battleship_request::Msg::Resign(pb::Resign {})),
+                                                        };
+                                                        swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
+                                                    }
                                                     in_game = false;
                                                     is_my_turn = false;
                                                     toggle_logs_during_in_game(in_game, &handle);
@@ -912,6 +968,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     is_my_turn = false;
                                                     println!("Waiting for opponent");
                                                 }
+                                            }
+
+                                            Some(pb::battleship_response::Msg::ResignAck(_)) => {
+                                                println!("Resign acknowledged. Game ended.");
+
+                                                in_game = false;
+                                                is_my_turn = false;
+                                                toggle_logs_during_in_game(in_game, &handle);
                                             }
 
                                             _ => {}
@@ -1046,6 +1110,7 @@ fn print_help(in_game: bool) {
         println!("challenge <index>");
     } else {
         println!("shoot <col> <row>");
+        println!("resign");
     }
 
     println!("help");

@@ -74,6 +74,7 @@ enum CliCommand {
     View(String),
     Discover,
     Challenge(usize),
+    Accept(bool),
     Shoot(u32, u32),
     Resign,
     Help,
@@ -270,6 +271,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut discovered_peers: HashSet<PeerId> = HashSet::new();
     let mut selected_peer: Option<PeerId> = None;
 
+    let mut pending_challenge: Option<(PeerId, request_response::ResponseChannel<ChallengeResponseMsg>,)> = None;
+
     let mut in_game = false;
     let mut is_my_turn = false;
     let mut shot_seq: u32 = 1;
@@ -418,6 +421,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             None
                         }
                     },
+                    "accept" if parts.len() == 2 => {
+                        match parts[1].parse::<bool>() {
+                            Ok(value) => Some(CliCommand::Accept(value)),
+                            Err(_) => {
+                                println!("Use: accept true OR accept false");
+                                None
+                            }
+                        }
+                    },
                     "shoot" if parts.len() == 3 => {
                         if let (Ok(col), Ok(row)) = (parts[1].parse(), parts[2].parse()) {
                             Some(CliCommand::Shoot(col, row))
@@ -550,6 +562,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("Invalid selection");
                         continue;
                     }
+
                     let target = peers[index - 1];
                     selected_peer = Some(target);
                     println!("Sending challenge to: {}", target);
@@ -560,6 +573,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             nickname: "emmanuel".to_string(),
                         },
                     );
+                }
+
+                CliCommand::Accept(accepted) => {
+                    let Some((peer, channel)) = pending_challenge.take() else {
+                        println!("No pending challenge");
+                        continue;
+                    };
+
+                    let response = ChallengeResponseMsg {
+                        accepted,
+                    };
+
+                    swarm
+                        .behaviour_mut()
+                        .challenge
+                        .send_response(channel, response)
+                        .unwrap();
+
+                    if !accepted {
+                        println!("Declined challenge from {}", peer);
+
+                        selected_peer = None;
+                        in_game = false;
+                        is_my_turn = false;
+                        shot_seq = 1;
+
+                        // Important:
+                        // If accepted = false, stop here.
+                        // Do not send BoardReady.
+                        // Do not unregister from rendezvous.
+                        continue;
+                    }
+
+                    println!("Accepted challenge from {}", peer);
+                    println!("Game starting with {}", peer);
+
+                    selected_peer = Some(peer);
+                    is_my_turn = false;
+                    in_game = true;
+                    toggle_logs_during_in_game(in_game, &handle);
+
+                    println!("Sending BoardReady to {}", peer);
+
+                    let msg = pb::BattleshipRequest {
+                        msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
+                    };
+
+                    swarm
+                        .behaviour_mut()
+                        .battleship
+                        .send_request(&peer, BattleshipReq { msg });
+
+                    let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                    swarm.behaviour_mut().rendezvous.unregister(ns, bootstrap_peer_id);
+                    println!("Unregistered from matchmaking");
                 }
 
                 CliCommand::Shoot(col, row) => {
@@ -773,36 +841,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     } => {
                                         println!("Incoming challenge from {} (nickname: {})", peer, request.nickname);
 
-                                        let response = ChallengeResponseMsg {
-                                            accepted: true,
-                                        };
+                                        if in_game {
+                                            println!("Already in a game. Auto-declining challenge from {}", peer);
 
-                                        swarm.behaviour_mut().challenge.send_response(channel, response).unwrap();
-
-                                        println!("Accepted challenge from {}", peer);
-                                        println!("Game starting with {}", peer);
-                                        selected_peer = Some(peer);
-                                        is_my_turn = false;
-                                        in_game = true;
-                                        toggle_logs_during_in_game(in_game, &handle);
-
-                                        if let Some(target) = selected_peer {
-                                            println!("Sending BoardReady to {}", target);
-                                            let msg = pb::BattleshipRequest {
-                                                msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
+                                            let response = ChallengeResponseMsg {
+                                                accepted: false,
                                             };
+
                                             swarm
                                                 .behaviour_mut()
-                                                .battleship
-                                                .send_request(&target, BattleshipReq { msg });
+                                                .challenge
+                                                .send_response(channel, response)
+                                                .unwrap();
+
+                                            continue;
                                         }
 
-                                        // Unregister
-                                        use rendezvous::Namespace;
-                                        let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+                                        if pending_challenge.is_some() {
+                                            println!("Already have a pending challenge. Auto-declining challenge from {}", peer);
 
-                                        swarm.behaviour_mut().rendezvous.unregister(ns, bootstrap_peer_id);
-                                        println!("Unregistered from matchmaking");
+                                            let response = ChallengeResponseMsg {
+                                                accepted: false,
+                                            };
+                                            swarm.behaviour_mut().challenge.send_response(channel, response).unwrap();
+                                            continue;
+                                        }
+
+                                        pending_challenge = Some((peer, channel));
+
+                                        println!("Challenge pending from {}", peer);
+                                        println!("\"accept <true|false>\"");
                                     }
 
                                     RequestResponseMessage::Response {
@@ -811,30 +879,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     } => {
                                         println!("Challenge response: accepted = {}", response.accepted);
 
-                                        if response.accepted {
-                                            is_my_turn = true;
-                                            println!("Game starting with {}", peer);
-
-                                            in_game = true;
-                                            toggle_logs_during_in_game(in_game, &handle);
-                                            if let Some(target) = selected_peer {
-                                                println!("Sending BoardReady to {}", target);
-                                                let msg = pb::BattleshipRequest {
-                                                    msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
-                                                };
-                                                swarm
-                                                    .behaviour_mut()
-                                                    .battleship
-                                                    .send_request(&target, BattleshipReq { msg });
-                                            }
-
-                                            // Unregister from rendezvous
-                                            use rendezvous::Namespace;
-                                            let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
-
-                                            swarm.behaviour_mut().rendezvous.unregister(ns, bootstrap_peer_id);
-                                            println!("Unregistered from matchmaking");
+                                        if !response.accepted {
+                                            println!("Challenge declined by {}", peer);
+                                            selected_peer = None;
+                                            in_game = false;
+                                            is_my_turn = false;
+                                            shot_seq = 1;
+                                            continue;
                                         }
+
+                                        is_my_turn = true;
+                                        println!("Game starting with {}", peer);
+                                        in_game = true;
+                                        toggle_logs_during_in_game(in_game, &handle);
+
+                                        if let Some(target) = selected_peer {
+                                            println!("Sending BoardReady to {}", target);
+                                            let msg = pb::BattleshipRequest {
+                                                msg: Some(pb::battleship_request::Msg::BoardReady(pb::BoardReady {})),
+                                            };
+
+                                            swarm.behaviour_mut().battleship.send_request(&target, BattleshipReq { msg });
+                                        }
+                                        // Unregister from rendezvous
+                                        use rendezvous::Namespace;
+                                        let ns = Namespace::new("peerboard/challenge/seeking".to_string()).unwrap();
+
+                                        swarm.behaviour_mut().rendezvous.unregister(ns, bootstrap_peer_id);
+                                        println!("Unregistered from matchmaking");
                                     }
                                 }
                             }
@@ -1203,6 +1275,7 @@ fn print_help(in_game: bool) {
         println!("view");
         println!("discover");
         println!("challenge <index>");
+        println!("accept <true|false>");
     } else {
         println!("shoot <col> <row>");
         println!("resign");

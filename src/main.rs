@@ -74,6 +74,7 @@ enum CliCommand {
     View(String),
     Discover,
     Challenge(usize),
+    Shoot(u32, u32),
     Help,
 }
 
@@ -383,7 +384,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let mut lines = io::BufReader::new(io::stdin()).lines();
 
-            print_help();
+            print_help(in_game);
 
             while let Ok(Some(line)) = lines.next_line().await {
                 let parts: Vec<&str> = line.trim().split_whitespace().collect();
@@ -413,6 +414,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             Some(CliCommand::Challenge(idx))
                         } else {
                             println!("Invalid index");
+                            None
+                        }
+                    },
+                    "shoot" if parts.len() == 3 => {
+                        if let (Ok(col), Ok(row)) = (parts[1].parse(), parts[2].parse()) {
+                            Some(CliCommand::Shoot(col, row))
+                        } else {
+                            println!("Invalid coordinates");
                             None
                         }
                     }
@@ -551,8 +560,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
+                    CliCommand::Shoot(col, row) => {
+                        if !in_game {
+                            println!("Not in a game");
+                            continue;
+                        }
+                        if !is_my_turn {
+                            println!("Not your turn");
+                            continue;
+                        }
+                        if col > 9 || row > 9 {
+                            println!("Coordinates must be 0–9");
+                            continue;
+                        }
+                        println!("Firing at ({}, {})", col, row);
+                    }
+
                 CliCommand::Help => {
-                    print_help();
+                    print_help(in_game);
                 }
             }
         }
@@ -891,16 +916,21 @@ fn insert_message_id(msg: &pb::PeerBoardMessage, conn: &Connection) {
     );
 }
 
-fn print_help() {
+fn print_help(in_game: bool) {
     println!("\nAvailable commands:");
-    println!("subscribe <topic>");
-    println!("unsubscribe <topic>");
-    println!("post <topic> <message>");
-    println!("view <topic>");
-    println!("discover");
-    println!("challenge <index>");
+    if !in_game {
+        println!("subscribe <topic>");
+        println!("unsubscribe <topic>");
+        println!("post <topic> <message>");
+        println!("view");
+        println!("discover");
+        println!("challenge <index>");
+    } else {
+        println!("shoot <col> <row>");
+    }
+
     println!("help");
-    println!("\n[peerboard] > ")
+    println!("\n[peerboard] > ");
 }
 
 fn is_valid_topic(s: &str) -> bool {

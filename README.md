@@ -93,7 +93,10 @@ Machine A receives the message after a few seconds.
 2. Start publisher
 3. Verify message received
 4. Run list to confirm storage
-5. 
+5. Discover peer
+6. Send/Receive Challenge to/from peer
+7. Accept or Decline request
+   1. If Accept => Battleship
 
 ---
 
@@ -157,7 +160,7 @@ resign
 ```
 ----
 ### Notes
-Logs will be turned off during battle state. Turned on again after.
+Logs will be turned off during battle state. Turned on again after resign.
 
 Identity Handling
 
@@ -173,6 +176,6 @@ On different machines → default is fine
 
 ### Battleship
 
-Ships are auto placed in fixed position
+Ships are auto placed in random position
 
 ---

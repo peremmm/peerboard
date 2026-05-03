@@ -310,7 +310,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut is_my_turn = false;
     let mut shot_seq: u32 = 1;
 
-    let my_board = create_fixed_board();
+    let my_board = create_random_board();
     let mut my_hits = [[false; 10]; 10];
     let mut my_shots = [[false; 10]; 10];
     let mut pending_publish: Option<(IdentTopic, Vec<u8>)> = None;
@@ -1040,9 +1040,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                                     swarm.behaviour_mut().battleship
                                                     .send_response(channel, BattleshipRes { msg: response }).unwrap();
-                                                    ui_success(format!("Board acknowledged for {}", short_peer(&peer)));
-                                                    ui_game("Game ready.");
-                                                    print_turn(is_my_turn);
                                                 }
 
                                                 Some(pb::battleship_request::Msg::Shot(shot)) => {
@@ -1159,8 +1156,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         RequestResponseMessage::Response { response, .. } => {
                                             match response.msg.msg {
                                                 Some(pb::battleship_response::Msg::BoardAck(_)) => {
-                                                    ui_success(format!("Received board acknowledgement from {}", short_peer(&peer)));
-                                                    ui_game("Game ready.");
+                                                    ui_game(format!("Boards ready with {}.", short_peer(&peer)));
                                                     print_turn(is_my_turn);
                                                 }
 
@@ -1490,36 +1486,42 @@ fn is_valid_topic(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-// TODO fixed placement for now
-fn create_fixed_board() -> [[bool; 10]; 10] {
+fn create_random_board() -> [[bool; 10]; 10] {
     let mut board = [[false; 10]; 10];
 
-    // carrier: 5 cells
-    for col in 0..5 {
-        board[0][col] = true;
-    }
+    for ship_len in [5usize, 4, 3, 3, 2] {
+        loop {
+            let horizontal = random_index(2) == 0;
+            let max_row = if horizontal { 10 } else { 11 - ship_len };
+            let max_col = if horizontal { 11 - ship_len } else { 10 };
+            let row = random_index(max_row);
+            let col = random_index(max_col);
 
-    // battleship: 4 cells
-    for col in 0..4 {
-        board[2][col] = true;
-    }
+            let clear = (0..ship_len).all(|offset| {
+                let row = if horizontal { row } else { row + offset };
+                let col = if horizontal { col + offset } else { col };
+                !board[row][col]
+            });
 
-    // cruiser: 3 cells
-    for col in 0..3 {
-        board[4][col] = true;
-    }
+            if clear {
+                for offset in 0..ship_len {
+                    let row = if horizontal { row } else { row + offset };
+                    let col = if horizontal { col + offset } else { col };
+                    board[row][col] = true;
+                }
 
-    // submarine: 3 cells
-    for col in 0..3 {
-        board[6][col] = true;
-    }
-
-    // destroyer: 2 cells
-    for col in 0..2 {
-        board[8][col] = true;
+                break;
+            }
+        }
     }
 
     board
+}
+
+fn random_index(max: usize) -> usize {
+    let bytes = *Uuid::new_v4().as_bytes();
+    let value = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    (value as usize) % max
 }
 
 fn all_ship_cells_hit(board: &[[bool; 10]; 10], hits: &[[bool; 10]; 10]) -> bool {
